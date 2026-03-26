@@ -1714,6 +1714,29 @@ function disconnectScraperWebSocket() {
 async function startScraper() {
     const city = document.getElementById('scraperCity').value || 'Toulouse';
     const category = document.getElementById('scraperCategory').value || 'restaurant';
+    const feed = document.getElementById('scraperFeed');
+
+    // 1. Verifier le cap mensuel AVANT de lancer
+    const cap = await apiFetch('/scraper/cap');
+    if (cap) {
+        if (cap.blocked) {
+            if (feed) feed.innerHTML = `
+                <div class="card" style="border-left:3px solid var(--danger);margin-top:12px">
+                    <p style="color:var(--danger);font-weight:600"><i class="fa-solid fa-ban"></i> CAP MENSUEL ATTEINT</p>
+                    <p style="color:var(--text-muted);font-size:0.85rem;margin-top:6px">
+                        ${cap.used}/${cap.cap} requetes utilisees ce mois-ci (${cap.month}).<br>
+                        Le scraper est bloque jusqu'au mois prochain. Aucun frais facture.
+                    </p>
+                </div>`;
+            updateScraperStats('Cap atteint');
+            return;
+        }
+        // Afficher le cap restant
+        if (feed) feed.innerHTML = `
+            <div style="padding:8px 12px;background:rgba(99,102,241,0.1);border-radius:8px;margin-bottom:12px;font-size:0.85rem;color:var(--accent)">
+                <i class="fa-solid fa-gauge"></i> Credits restants : ${cap.remaining}/${cap.cap} (${cap.percent_used}% utilise)
+            </div>`;
+    }
 
     document.getElementById('scraperStatus').className = 'scraper-status online';
     document.getElementById('scraperStatus').innerHTML = '<i class="fa-solid fa-circle"></i> Scraper actif';
@@ -1721,25 +1744,85 @@ async function startScraper() {
     scraperLeadsFound = 0;
     scraperDuplicates = 0;
     scraperErrors = 0;
-    const feed = document.getElementById('scraperFeed');
-    if (feed) feed.innerHTML = '';
 
     updateScraperStats('Demarrage...');
-
-    // Ouvrir la connexion WebSocket pour le feed temps reel
     connectScraperWebSocket();
 
-    // Lancer le scrape cote backend
-    const result = await apiFetch('/scraper/start', {
-        method: 'POST',
-        body: JSON.stringify({ query: category, city: city, limit: 100 }),
-    });
+    // 2. Lancer le scrape — capturer les erreurs detaillees
+    try {
+        const res = await fetch(`${API}/scraper/start`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                ...(accessToken ? { 'Authorization': `Bearer ${accessToken}` } : {}),
+            },
+            body: JSON.stringify({ query: category, city: city, limit: 100 }),
+        });
+        const data = await res.json();
 
-    if (!result) {
-        updateScraperStats('Erreur demarrage');
+        if (!res.ok) {
+            // Afficher l'erreur exacte du backend
+            const errorMsg = data.detail || `Erreur ${res.status}`;
+            if (feed) feed.innerHTML += `
+                <div class="card" style="border-left:3px solid var(--danger);margin-top:8px">
+                    <p style="color:var(--danger);font-weight:600"><i class="fa-solid fa-triangle-exclamation"></i> ${errorMsg}</p>
+                </div>`;
+            updateScraperStats('Erreur');
+            disconnectScraperWebSocket();
+            document.getElementById('scraperStatus').className = 'scraper-status offline';
+            document.getElementById('scraperStatus').innerHTML = '<i class="fa-solid fa-circle"></i> Erreur';
+            return;
+        }
+
+        // Succes — afficher le message
+        if (feed) feed.innerHTML += `
+            <div style="padding:8px 12px;background:rgba(34,197,94,0.1);border-radius:8px;margin-bottom:8px;font-size:0.85rem;color:var(--success)">
+                <i class="fa-solid fa-check"></i> ${data.message || 'Scrape lance'}
+            </div>`;
+
+        // 3. Poller le statut toutes les 3s pour afficher la progression
+        const pollInterval = setInterval(async () => {
+            const status = await apiFetch('/scraper/status');
+            if (status) {
+                scraperLeadsFound = status.stats?.inserted || 0;
+                scraperDuplicates = status.stats?.duplicates || 0;
+                scraperErrors = status.stats?.errors || 0;
+                updateScraperStats(status.running ? 'En cours...' : 'Termine');
+
+                if (!status.running) {
+                    clearInterval(pollInterval);
+                    document.getElementById('scraperStatus').className = 'scraper-status offline';
+                    document.getElementById('scraperStatus').innerHTML = '<i class="fa-solid fa-circle"></i> Termine';
+                    disconnectScraperWebSocket();
+
+                    // Resume final
+                    const total = status.stats?.inserted || 0;
+                    const dupes = status.stats?.duplicates || 0;
+                    if (feed) feed.innerHTML += `
+                        <div class="card" style="border-left:3px solid ${total > 0 ? 'var(--success)' : 'var(--warning)'};margin-top:8px">
+                            <p style="font-weight:600;color:${total > 0 ? 'var(--success)' : 'var(--warning)'}">
+                                ${total > 0
+                                    ? `<i class="fa-solid fa-check"></i> ${total} leads inseres (${dupes} doublons evites)`
+                                    : `<i class="fa-solid fa-info-circle"></i> 0 nouveau lead (${dupes} doublons, ou tous les resultats avaient deja un site web)`
+                                }
+                            </p>
+                        </div>`;
+                    // Recharger l'historique
+                    loadScraperHistory();
+                }
+            }
+        }, 3000);
+
+    } catch (e) {
+        console.error('[Scraper] Erreur reseau:', e);
+        if (feed) feed.innerHTML += `
+            <div class="card" style="border-left:3px solid var(--danger);margin-top:8px">
+                <p style="color:var(--danger)"><i class="fa-solid fa-wifi"></i> Erreur reseau — verifiez la connexion</p>
+            </div>`;
+        updateScraperStats('Erreur reseau');
         disconnectScraperWebSocket();
         document.getElementById('scraperStatus').className = 'scraper-status offline';
-        document.getElementById('scraperStatus').innerHTML = '<i class="fa-solid fa-circle"></i> Erreur';
+        document.getElementById('scraperStatus').innerHTML = '<i class="fa-solid fa-circle"></i> Hors ligne';
     }
 }
 
