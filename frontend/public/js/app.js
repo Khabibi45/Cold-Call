@@ -417,6 +417,214 @@ let currentLead = null;
 let callTimerInterval = null;
 let callStartTime = null;
 
+// ============================================
+// TWILIO VOICE SDK — Variables globales
+// ============================================
+let twilioDevice = null;
+let currentConnection = null;
+let twilioReady = false;       // true si le Device est enregistre
+let simulationMode = true;     // fallback si Twilio non configure
+let twilioRetryCount = 0;      // compteur retry pour connexion echouee
+
+// ============================================
+// TWILIO — Initialisation du Device
+// ============================================
+async function initTwilioDevice() {
+    try {
+        // 1. Recuperer le token JWT depuis le backend
+        const tokenData = await apiFetch('/twilio/token', { method: 'POST' });
+        if (!tokenData || !tokenData.token) {
+            console.warn('[Twilio] Pas de token — mode simulation active');
+            enableSimulationMode();
+            return false;
+        }
+
+        // 2. Creer le Device Twilio Voice SDK v2
+        twilioDevice = new Twilio.Device(tokenData.token, {
+            // Codec preferentiel pour meilleure qualite
+            codecPreferences: ['opus', 'pcmu'],
+            // Fermer les connexions proprement
+            closeProtection: true,
+        });
+
+        // 3. Ecouter les evenements du Device
+        twilioDevice.on('registered', () => {
+            console.log('[Twilio] Device enregistre — pret a appeler');
+            twilioReady = true;
+            simulationMode = false;
+            hideSimulationBanner();
+            updateCallStatus('PRET');
+        });
+
+        twilioDevice.on('error', (error) => {
+            console.error('[Twilio] Erreur Device:', error.message);
+            updateCallStatus('ERREUR TWILIO');
+            // Si erreur de permission micro
+            if (error.message && error.message.includes('permission')) {
+                updateCallStatus('AUTORISEZ LE MICRO');
+                alert('Autorisez le micro pour passer des appels');
+            }
+        });
+
+        twilioDevice.on('incoming', (call) => {
+            console.log('[Twilio] Appel entrant — acceptation auto');
+            // Accepter automatiquement les appels entrants (mode power dialer)
+            call.accept();
+            currentConnection = call;
+            setupCallEventListeners(call);
+        });
+
+        twilioDevice.on('tokenWillExpire', async () => {
+            // Renouveler le token avant expiration
+            console.log('[Twilio] Renouvellement du token...');
+            const refreshData = await apiFetch('/twilio/token', { method: 'POST' });
+            if (refreshData && refreshData.token) {
+                twilioDevice.updateToken(refreshData.token);
+            }
+        });
+
+        // 4. Enregistrer le Device pour recevoir des appels entrants
+        await twilioDevice.register();
+        return true;
+
+    } catch (e) {
+        console.error('[Twilio] Echec initialisation:', e.message);
+        enableSimulationMode();
+        return false;
+    }
+}
+
+// Configurer les listeners sur une connexion d'appel active
+function setupCallEventListeners(call) {
+    call.on('accept', () => {
+        console.log('[Twilio] Appel connecte');
+        startCallTimer();
+        updateCallStatus('CONNECTE');
+        showMicIndicator(true);
+    });
+
+    call.on('disconnect', () => {
+        console.log('[Twilio] Appel termine');
+        stopCallTimer();
+        updateCallStatus('RACCROCHE — Choisir un statut');
+        showMicIndicator(false);
+        currentConnection = null;
+    });
+
+    call.on('cancel', () => {
+        console.log('[Twilio] Appel annule');
+        stopCallTimer();
+        updateCallStatus('ANNULE — Choisir un statut');
+        showMicIndicator(false);
+        currentConnection = null;
+    });
+
+    call.on('error', (error) => {
+        console.error('[Twilio] Erreur appel:', error.message);
+        stopCallTimer();
+        updateCallStatus('ERREUR APPEL');
+        showMicIndicator(false);
+        currentConnection = null;
+
+        // Retry automatique 1 fois
+        if (twilioRetryCount < 1 && currentLead) {
+            twilioRetryCount++;
+            console.log('[Twilio] Retry automatique...');
+            setTimeout(() => makeRealCall(), 2000);
+        } else {
+            twilioRetryCount = 0;
+        }
+    });
+
+    call.on('ringing', () => {
+        console.log('[Twilio] Ca sonne...');
+        updateCallStatus('CA SONNE...');
+    });
+}
+
+// ============================================
+// TWILIO — Passer un vrai appel
+// ============================================
+async function makeRealCall() {
+    if (!currentLead || !currentLead.phone) {
+        updateCallStatus('PAS DE NUMERO');
+        return;
+    }
+
+    // Mode simulation : on simule juste le timer
+    if (simulationMode) {
+        console.log('[Simulation] Appel simule vers', currentLead.phone);
+        startCallTimer();
+        updateCallStatus('APPEL EN COURS (simulation)');
+        return;
+    }
+
+    // Mode reel : utiliser device.connect() pour appeler directement
+    try {
+        updateCallStatus('CONNEXION...');
+        twilioRetryCount = 0;
+
+        const params = {
+            To: currentLead.phone,
+            LeadId: String(currentLead.id),
+        };
+
+        currentConnection = await twilioDevice.connect({ params });
+        setupCallEventListeners(currentConnection);
+
+    } catch (e) {
+        console.error('[Twilio] Echec appel:', e.message);
+        updateCallStatus('ECHEC APPEL');
+
+        // Retry automatique 1 fois
+        if (twilioRetryCount < 1 && currentLead) {
+            twilioRetryCount++;
+            console.log('[Twilio] Retry automatique...');
+            setTimeout(() => makeRealCall(), 2000);
+        }
+    }
+}
+
+// ============================================
+// TWILIO — UI helpers
+// ============================================
+function updateCallStatus(status) {
+    const el = document.getElementById('callStatus');
+    if (!el) return;
+    el.textContent = status;
+
+    // Couleurs selon le statut
+    if (status.includes('CONNECTE')) {
+        el.style.color = 'var(--success)';
+    } else if (status.includes('ERREUR') || status.includes('ECHEC')) {
+        el.style.color = 'var(--danger)';
+    } else if (status.includes('RACCROCHE') || status.includes('ANNULE')) {
+        el.style.color = 'var(--warning)';
+    } else if (status.includes('SONNE') || status.includes('CONNEXION')) {
+        el.style.color = 'var(--info)';
+    } else {
+        el.style.color = 'var(--text-muted)';
+    }
+}
+
+function showMicIndicator(visible) {
+    const el = document.getElementById('micIndicator');
+    if (el) el.style.display = visible ? '' : 'none';
+}
+
+function enableSimulationMode() {
+    simulationMode = true;
+    twilioReady = false;
+    const banner = document.getElementById('simulationBanner');
+    if (banner) banner.style.display = '';
+    console.warn('[Twilio] Mode simulation active — aucun appel reel ne partira');
+}
+
+function hideSimulationBanner() {
+    const banner = document.getElementById('simulationBanner');
+    if (banner) banner.style.display = 'none';
+}
+
 function loadDispositionButtons() {
     const container = document.getElementById('dispositionButtons');
     if (!container) return;
@@ -436,25 +644,46 @@ function selectDisposition(code) {
     });
 }
 
-function startDialerSession() {
+async function startDialerSession() {
     document.getElementById('btnStartSession').style.display = 'none';
     document.getElementById('btnHangup').style.display = '';
     document.getElementById('btnSkip').style.display = '';
     document.getElementById('btnPause').style.display = '';
-    document.getElementById('callStatus').textContent = 'CHARGEMENT...';
+    updateCallStatus('INITIALISATION TWILIO...');
+
+    // Initialiser le SDK Twilio (si pas deja fait)
+    if (!twilioDevice) {
+        await initTwilioDevice();
+    }
+
+    updateCallStatus('CHARGEMENT...');
     loadNextLead();
 }
 
 async function loadNextLead() {
-    const data = await apiFetch('/leads/?per_page=1&has_website=false');
-    if (!data || !data.data || !data.data.length) {
-        document.getElementById('callStatus').textContent = 'PLUS DE LEADS';
+    // Essayer d'abord le endpoint dialer dedie, sinon fallback sur leads
+    let lead = null;
+    const dialerData = await apiFetch('/dialer/next');
+    if (dialerData && dialerData.id) {
+        lead = dialerData;
+    } else {
+        // Fallback : recuperer un lead depuis la liste classique
+        const data = await apiFetch('/leads/?per_page=1&has_website=false');
+        if (data && data.data && data.data.length) {
+            lead = data.data[0];
+        }
+    }
+
+    if (!lead) {
+        updateCallStatus('PLUS DE LEADS');
         return;
     }
-    currentLead = data.data[0];
+
+    currentLead = lead;
     displayCurrentLead(currentLead);
-    startCallTimer();
-    document.getElementById('callStatus').textContent = 'APPEL EN COURS...';
+
+    // Auto-lancer l'appel (reel ou simulation)
+    makeRealCall();
 }
 
 function displayCurrentLead(lead) {
@@ -497,17 +726,48 @@ function stopCallTimer() {
 
 function hangupCall() {
     const duration = stopCallTimer();
-    document.getElementById('callStatus').textContent = 'RACCROCHE — Choisir un statut';
+    showMicIndicator(false);
+
+    // Raccrocher l'appel reel si une connexion existe
+    if (currentConnection) {
+        try {
+            currentConnection.disconnect();
+        } catch (e) {
+            console.warn('[Twilio] Erreur lors du raccrochage:', e.message);
+        }
+        currentConnection = null;
+    } else if (!simulationMode) {
+        // Fallback : demander au backend de raccrocher
+        apiFetch('/twilio/hangup', { method: 'POST' }).catch(() => {});
+    }
+
+    updateCallStatus('RACCROCHE — Choisir un statut');
 }
 
 function skipLead() {
     stopCallTimer();
+    showMicIndicator(false);
+
+    // Raccrocher l'appel en cours avant de passer au suivant
+    if (currentConnection) {
+        try { currentConnection.disconnect(); } catch (e) {}
+        currentConnection = null;
+    }
+
     loadNextLead();
 }
 
 function pauseSession() {
     stopCallTimer();
-    document.getElementById('callStatus').textContent = 'SESSION EN PAUSE';
+    showMicIndicator(false);
+
+    // Raccrocher l'appel en cours si actif
+    if (currentConnection) {
+        try { currentConnection.disconnect(); } catch (e) {}
+        currentConnection = null;
+    }
+
+    updateCallStatus('SESSION EN PAUSE');
     document.getElementById('btnStartSession').style.display = '';
     document.getElementById('btnStartSession').innerHTML = '<i class="fa-solid fa-play"></i> Reprendre';
     document.getElementById('btnHangup').style.display = 'none';
@@ -534,8 +794,15 @@ async function submitDisposition() {
 
     await apiFetch('/calls/', { method: 'POST', body: JSON.stringify(data) });
 
+    // Nettoyer la connexion en cours
+    showMicIndicator(false);
+    if (currentConnection) {
+        try { currentConnection.disconnect(); } catch (e) {}
+        currentConnection = null;
+    }
+
     // Auto-dial suivant
-    document.getElementById('callStatus').textContent = 'CHARGEMENT SUIVANT...';
+    updateCallStatus('CHARGEMENT SUIVANT...');
     setTimeout(() => loadNextLead(), 500);
 }
 
@@ -726,16 +993,13 @@ function escapeCsv(str) {
 }
 
 // ============================================
-// SCRAPER FEED (simule temps reel)
+// SCRAPER FEED (temps reel via WebSocket)
 // ============================================
-let scraperInterval = null;
-const SCRAPER_MOCK_BUSINESSES = [
-    'Boulangerie du Capitole', 'Pizzeria Bella Vita', 'Salon Coiffure Elegance',
-    'Garage Auto Plus', 'Plombier Express', 'Restaurant Le Petit Bistrot',
-    'Electricien Toulouse', 'Kebab Istanbul', 'Cabinet Comptable Dupont',
-    'Fleuriste Rose & Lys', 'Pressing Rapide', 'Boucherie Tradition',
-    'Pharmacie Centrale', 'Cordonnerie Martin', 'Taxi Toulouse Sud',
-];
+let scraperWs = null;
+let scraperPingInterval = null;
+let scraperLeadsFound = 0;
+let scraperDuplicates = 0;
+let scraperErrors = 0;
 
 function initScraperFeed() {
     const statsContainer = document.getElementById('scraperStats');
@@ -743,15 +1007,96 @@ function initScraperFeed() {
         statsContainer.innerHTML = renderStatCards([
             { label: 'Leads trouves', value: 0, icon: 'fa-building', color: 'var(--success)' },
             { label: 'Doublons evites', value: 0, icon: 'fa-copy', color: 'var(--warning)' },
-            { label: 'En cours', value: 'Arrete', icon: 'fa-spinner', color: 'var(--text-muted)' },
+            { label: 'Statut', value: 'Arrete', icon: 'fa-spinner', color: 'var(--text-muted)' },
         ]);
     }
 }
 
-let scraperLeadsFound = 0;
-let scraperDuplicates = 0;
+/**
+ * Ouvre une connexion WebSocket vers le backend pour recevoir les leads en temps reel.
+ */
+function connectScraperWebSocket() {
+    // Determiner le protocole ws/wss selon la page
+    const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const wsUrl = `${wsProtocol}//${window.location.host}/api/ws/scraper`;
 
-function startScraper() {
+    try {
+        scraperWs = new WebSocket(wsUrl);
+    } catch (e) {
+        console.error('[WS] Erreur creation WebSocket :', e);
+        return;
+    }
+
+    scraperWs.onopen = () => {
+        console.log('[WS] Connexion scraper etablie');
+        // Heartbeat ping toutes les 30s pour eviter le timeout nginx
+        if (scraperPingInterval) clearInterval(scraperPingInterval);
+        scraperPingInterval = setInterval(() => {
+            if (scraperWs && scraperWs.readyState === WebSocket.OPEN) {
+                scraperWs.send('ping');
+            }
+        }, 30000);
+    };
+
+    scraperWs.onmessage = (event) => {
+        // Ignorer les pong texte
+        if (event.data === 'pong') return;
+
+        try {
+            const msg = JSON.parse(event.data);
+
+            if (msg.type === 'new_lead' && msg.data) {
+                // Nouveau lead insere — l'ajouter au feed
+                scraperLeadsFound++;
+                addScraperFeedItem(
+                    msg.data.business_name || 'Inconnu',
+                    msg.data.city || '',
+                    msg.data.phone || '',
+                    false
+                );
+                updateScraperStats('En cours...');
+            }
+
+            if (msg.type === 'stats' && msg.data) {
+                // Mise a jour des stats depuis le backend
+                scraperLeadsFound = msg.data.inserted || 0;
+                scraperDuplicates = msg.data.duplicates || 0;
+                scraperErrors = msg.data.errors || 0;
+                updateScraperStats('En cours...');
+            }
+        } catch (e) {
+            console.warn('[WS] Message non JSON recu :', event.data);
+        }
+    };
+
+    scraperWs.onclose = () => {
+        console.log('[WS] Connexion scraper fermee');
+        if (scraperPingInterval) {
+            clearInterval(scraperPingInterval);
+            scraperPingInterval = null;
+        }
+    };
+
+    scraperWs.onerror = (err) => {
+        console.error('[WS] Erreur WebSocket scraper :', err);
+    };
+}
+
+/**
+ * Ferme proprement la connexion WebSocket du scraper.
+ */
+function disconnectScraperWebSocket() {
+    if (scraperPingInterval) {
+        clearInterval(scraperPingInterval);
+        scraperPingInterval = null;
+    }
+    if (scraperWs) {
+        try { scraperWs.close(); } catch (e) { /* ignore */ }
+        scraperWs = null;
+    }
+}
+
+async function startScraper() {
     const city = document.getElementById('scraperCity').value || 'Toulouse';
     const category = document.getElementById('scraperCategory').value || 'restaurant';
 
@@ -760,35 +1105,36 @@ function startScraper() {
 
     scraperLeadsFound = 0;
     scraperDuplicates = 0;
+    scraperErrors = 0;
     const feed = document.getElementById('scraperFeed');
     if (feed) feed.innerHTML = '';
 
-    updateScraperStats('En cours...');
+    updateScraperStats('Demarrage...');
 
-    // Simuler l'arrivee de leads toutes les 1-3 secondes
-    if (scraperInterval) clearInterval(scraperInterval);
-    scraperInterval = setInterval(() => {
-        const isDuplicate = Math.random() < 0.2;
-        const bizName = SCRAPER_MOCK_BUSINESSES[Math.floor(Math.random() * SCRAPER_MOCK_BUSINESSES.length)];
-        const phone = '05 ' + String(Math.floor(10000000 + Math.random() * 90000000)).replace(/(\d{2})(\d{2})(\d{2})(\d{2})/, '$1 $2 $3 $4');
+    // Ouvrir la connexion WebSocket pour le feed temps reel
+    connectScraperWebSocket();
 
-        if (isDuplicate) {
-            scraperDuplicates++;
-            addScraperFeedItem(bizName, city, phone, true);
-        } else {
-            scraperLeadsFound++;
-            addScraperFeedItem(bizName, city, phone, false);
-        }
+    // Lancer le scrape cote backend
+    const result = await apiFetch('/scraper/start', {
+        method: 'POST',
+        body: JSON.stringify({ query: category, city: city, limit: 100 }),
+    });
 
-        updateScraperStats('En cours...');
-    }, 1500 + Math.random() * 2000);
+    if (!result) {
+        updateScraperStats('Erreur demarrage');
+        disconnectScraperWebSocket();
+        document.getElementById('scraperStatus').className = 'scraper-status offline';
+        document.getElementById('scraperStatus').innerHTML = '<i class="fa-solid fa-circle"></i> Erreur';
+    }
 }
 
-function stopScraper() {
-    if (scraperInterval) {
-        clearInterval(scraperInterval);
-        scraperInterval = null;
-    }
+async function stopScraper() {
+    // Arreter le scrape cote backend
+    await apiFetch('/scraper/stop', { method: 'POST' });
+
+    // Fermer le WebSocket
+    disconnectScraperWebSocket();
+
     document.getElementById('scraperStatus').className = 'scraper-status offline';
     document.getElementById('scraperStatus').innerHTML = '<i class="fa-solid fa-circle"></i> Scraper arrete';
     updateScraperStats('Arrete');
@@ -797,10 +1143,11 @@ function stopScraper() {
 function updateScraperStats(statusText) {
     const container = document.getElementById('scraperStats');
     if (container) {
+        const isActive = scraperWs && scraperWs.readyState === WebSocket.OPEN;
         container.innerHTML = renderStatCards([
-            { label: 'Leads trouves', value: scraperLeadsFound, icon: 'fa-building', color: 'var(--success)' },
+            { label: 'Leads inseres', value: scraperLeadsFound, icon: 'fa-building', color: 'var(--success)' },
             { label: 'Doublons evites', value: scraperDuplicates, icon: 'fa-copy', color: 'var(--warning)' },
-            { label: 'Statut', value: statusText, icon: 'fa-spinner', color: scraperInterval ? 'var(--success)' : 'var(--text-muted)' },
+            { label: 'Statut', value: statusText, icon: 'fa-spinner', color: isActive ? 'var(--success)' : 'var(--text-muted)' },
         ]);
     }
 }
@@ -811,19 +1158,27 @@ function addScraperFeedItem(name, city, phone, isDuplicate) {
 
     const item = document.createElement('div');
     item.className = 'scraper-item';
+    // Animation d'apparition
+    item.style.opacity = '0';
+    item.style.transform = 'translateY(-10px)';
+    item.style.transition = 'opacity 0.3s ease, transform 0.3s ease';
     item.innerHTML = `
         <i class="fa-solid ${isDuplicate ? 'fa-copy' : 'fa-building'}" style="color:${isDuplicate ? 'var(--warning)' : 'var(--success)'}; width:20px; text-align:center"></i>
         <div style="flex:1">
             <span style="font-weight:600;font-size:0.88rem">${name}</span>
-            <span style="color:var(--text-muted);font-size:0.78rem;margin-left:8px">${city} - ${phone}</span>
+            <span style="color:var(--text-muted);font-size:0.78rem;margin-left:8px">${city}${phone ? ' - ' + phone : ''}</span>
         </div>
         <span class="badge" style="background:${isDuplicate ? 'rgba(245,158,11,0.15);color:var(--warning)' : 'rgba(34,197,94,0.15);color:var(--success)'}">
             ${isDuplicate ? 'Doublon' : 'Nouveau'}
         </span>
     `;
 
-    // Inserer en haut
+    // Inserer en haut avec animation
     feed.insertBefore(item, feed.firstChild);
+    requestAnimationFrame(() => {
+        item.style.opacity = '1';
+        item.style.transform = 'translateY(0)';
+    });
 
     // Limiter a 50 items
     while (feed.children.length > 50) {
@@ -834,7 +1189,7 @@ function addScraperFeedItem(name, city, phone, isDuplicate) {
 // ============================================
 // SCRAPER CONTROLS
 // ============================================
-// startScraper et stopScraper sont deja definis plus haut
+// startScraper et stopScraper sont definis dans la section SCRAPER FEED ci-dessus
 
 // ============================================
 // SETTINGS

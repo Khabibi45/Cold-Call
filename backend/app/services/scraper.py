@@ -209,6 +209,44 @@ class ScraperService:
         return lead_data
 
     # ------------------------------------------------------------------
+    # Broadcast WebSocket (temps reel)
+    # ------------------------------------------------------------------
+    async def _broadcast_new_lead(self, lead_data: dict) -> None:
+        """Envoie un nouveau lead a tous les clients WebSocket connectes."""
+        try:
+            from app.api.websocket import manager
+            await manager.broadcast({
+                "type": "new_lead",
+                "data": {
+                    "business_name": lead_data.get("business_name"),
+                    "city": lead_data.get("city"),
+                    "phone": lead_data.get("phone"),
+                    "category": lead_data.get("category"),
+                    "lead_score": lead_data.get("lead_score"),
+                    "has_website": lead_data.get("has_website"),
+                },
+            })
+        except Exception as e:
+            logger.debug("Broadcast WebSocket new_lead echoue : %s", e)
+
+    async def _broadcast_stats(self) -> None:
+        """Envoie les stats du scrape en cours a tous les clients WebSocket."""
+        try:
+            from app.api.websocket import manager
+            await manager.broadcast({
+                "type": "stats",
+                "data": {
+                    "total": self._stats["total"],
+                    "inserted": self._stats["inserted"],
+                    "duplicates": self._stats["duplicates"],
+                    "errors": self._stats["errors"],
+                    "no_phone": self._stats["no_phone"],
+                },
+            })
+        except Exception as e:
+            logger.debug("Broadcast WebSocket stats echoue : %s", e)
+
+    # ------------------------------------------------------------------
     # Pipeline complet : scrape → dedup → insert
     # ------------------------------------------------------------------
     async def run_scrape(self, query: str, city: str, limit: int = 100) -> dict:
@@ -270,8 +308,14 @@ class ScraperService:
                         if result.rowcount > 0:
                             dedup.register(lead_data["phone_e164"], lead_data.get("place_id"))
                             self._stats["inserted"] += 1
+
+                            # Broadcaster le nouveau lead via WebSocket
+                            await self._broadcast_new_lead(lead_data)
                         else:
                             self._stats["duplicates"] += 1
+
+                        # Broadcaster les stats mises a jour
+                        await self._broadcast_stats()
 
                     except Exception as e:
                         logger.warning("Erreur traitement lead : %s", e)

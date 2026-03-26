@@ -128,8 +128,16 @@
 
                 <!-- Panneau central : controles appel -->
                 <div class="dialer-control-panel">
+                    <!-- Bandeau mode simulation (cache par defaut) -->
+                    <div id="simulationBanner" class="simulation-banner" style="display:none;background:rgba(245,158,11,0.15);color:var(--warning);padding:8px 16px;border-radius:8px;text-align:center;margin-bottom:12px;font-size:0.85rem">
+                        <i class="fa-solid fa-triangle-exclamation"></i> Mode simulation — Configurez Twilio pour les appels reels
+                    </div>
                     <div class="call-timer" id="callTimer">00:00</div>
                     <div class="call-status" id="callStatus">En attente</div>
+                    <!-- Indicateur micro actif -->
+                    <div id="micIndicator" style="display:none;text-align:center;margin:8px 0;font-size:0.85rem;color:var(--success)">
+                        <i class="fa-solid fa-microphone" style="color:var(--success);animation:pulse 1s infinite"></i> Micro actif
+                    </div>
                     <div class="dialer-buttons">
                         <button id="btnStartSession" class="btn btn-lg btn-success" onclick="startDialerSession()">
                             <i class="fa-solid fa-play"></i> Demarrer session
@@ -274,6 +282,7 @@
     </main>
 
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+    <script src="https://media.twiliocdn.com/sdk/js/voice/releases/2.12/twilio.min.js"></script>
     <script src="/js/app.js"></script>
 </body>
 </html>

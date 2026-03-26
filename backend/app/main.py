@@ -10,6 +10,7 @@ from sentry_sdk.integrations.fastapi import FastApiIntegration
 from sentry_sdk.integrations.starlette import StarletteIntegration
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.middleware.sessions import SessionMiddleware
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 
@@ -25,6 +26,9 @@ from app.api.scraper import router as scraper_router
 from app.api.import_leads import router as import_router
 from app.api.dialer import router as dialer_router
 from app.api.export import router as export_router
+from app.api.twilio_endpoints import router as twilio_router
+from app.api.oauth import router as oauth_router
+from app.api.websocket import router as ws_router
 from app.core.rate_limiter import limiter
 from app.services.dedup import DeduplicationService
 
@@ -88,6 +92,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# --- Session middleware (requis par authlib pour OAuth2 state) ---
+app.add_middleware(SessionMiddleware, secret_key=settings.jwt_secret_key)
+
 
 # --- Sentry : contexte utilisateur quand disponible ---
 @app.middleware("http")
@@ -121,4 +128,7 @@ app.include_router(stats_router, prefix="/api/stats", tags=["Statistiques"])
 app.include_router(scraper_router, prefix="/api/scraper", tags=["Scraper"])
 app.include_router(import_router, prefix="/api/leads", tags=["Import"])
 app.include_router(dialer_router, prefix="/api/dialer", tags=["Power Dialer"])
+app.include_router(twilio_router, prefix="/api/twilio", tags=["Twilio"])
 app.include_router(export_router, prefix="/api/export", tags=["Export"])
+app.include_router(oauth_router, prefix="/api/auth", tags=["OAuth2"])
+app.include_router(ws_router, prefix="/api", tags=["WebSocket"])
