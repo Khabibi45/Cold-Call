@@ -1,0 +1,56 @@
+# ============================================
+# Cold Call Platform — Dependances Python
+# Fichier source pour pip-compile
+# ============================================
+
+# --- Framework ---
+fastapi>=0.115,<0.120
+uvicorn[standard]>=0.30,<0.35
+python-multipart>=0.0.9
+
+# --- Base de donnees ---
+sqlalchemy[asyncio]>=2.0,<2.1
+asyncpg>=0.29,<0.31
+alembic>=1.13,<1.15
+greenlet>=3.0
+
+# --- Redis ---
+redis[hiredis]>=5.0,<6.0
+
+# --- Auth ---
+authlib>=1.3,<1.5
+python-jose[cryptography]>=3.3,<3.4
+argon2-cffi>=23.1
+httpx>=0.27,<0.29
+
+# --- Validation ---
+pydantic>=2.7,<2.10
+pydantic-settings>=2.3,<2.7
+email-validator>=2.1
+
+# --- Telephonie Twilio ---
+twilio>=9.0,<10.0
+
+# --- Scraping ---
+phonenumbers>=8.13
+pybloom-live>=4.0,<5.0
+
+# --- Paiements ---
+stripe>=10.0,<12.0
+
+# --- Monitoring ---
+sentry-sdk[fastapi]>=2.7,<3.0
+
+# --- Securite ---
+slowapi>=0.1.9,<0.2
+
+# --- Utils ---
+python-dotenv>=1.0
+structlog>=24.1
+tenacity>=8.5,<9.0
+aiolimiter>=1.1,<1.2
+
+# --- Tests ---
+pytest>=8.0
+pytest-asyncio>=0.23
+httpx

@@ -1,0 +1,279 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Cold Call Platform — Turbine a Appels</title>
+    <meta name="description" content="Plateforme de cold calling avec scraper Google Maps, power dialer et CRM integre">
+    <meta property="og:title" content="Cold Call Platform">
+    <meta property="og:description" content="Trouvez des entreprises sans site web et appelez-les directement depuis votre navigateur">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+    <link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+    <!-- ============ SIDEBAR ============ -->
+    <aside id="sidebar" class="sidebar">
+        <div class="sidebar-header">
+            <i class="fa-solid fa-phone-volume"></i>
+            <h1>ColdCall</h1>
+        </div>
+        <nav>
+            <ul>
+                <li class="nav-item active" data-section="dashboard">
+                    <i class="fa-solid fa-chart-line"></i>
+                    <span>Dashboard</span>
+                </li>
+                <li class="nav-item" data-section="dialer">
+                    <i class="fa-solid fa-phone"></i>
+                    <span>Power Dialer</span>
+                </li>
+                <li class="nav-item" data-section="leads">
+                    <i class="fa-solid fa-database"></i>
+                    <span>Leads</span>
+                    <span id="leadsCounter" class="counter-badge">0</span>
+                </li>
+                <li class="nav-item" data-section="callbacks">
+                    <i class="fa-solid fa-calendar-check"></i>
+                    <span>Rappels</span>
+                    <span id="callbacksCounter" class="counter-badge">0</span>
+                </li>
+                <li class="nav-item" data-section="scraper">
+                    <i class="fa-solid fa-spider"></i>
+                    <span>Scraper</span>
+                </li>
+                <li class="nav-item" data-section="stats">
+                    <i class="fa-solid fa-chart-pie"></i>
+                    <span>Statistiques</span>
+                </li>
+                <li class="nav-item" data-section="settings">
+                    <i class="fa-solid fa-gear"></i>
+                    <span>Parametres</span>
+                </li>
+            </ul>
+        </nav>
+        <div class="sidebar-footer">
+            <div id="userInfo" class="user-info">
+                <i class="fa-solid fa-circle-user"></i>
+                <span>Non connecte</span>
+            </div>
+        </div>
+    </aside>
+
+    <!-- ============ MAIN CONTENT ============ -->
+    <main class="main-content">
+        <header class="top-bar">
+            <button id="sidebarToggle" class="sidebar-toggle">
+                <i class="fa-solid fa-bars"></i>
+            </button>
+            <h2 id="pageTitle">Dashboard</h2>
+            <div class="top-bar-actions">
+                <span id="scraperStatus" class="scraper-status offline">
+                    <i class="fa-solid fa-circle"></i> Scraper arrete
+                </span>
+            </div>
+        </header>
+
+        <!-- ============ SECTION: DASHBOARD ============ -->
+        <section class="content-section active" id="section-dashboard">
+            <div class="stats-grid" id="dashboardStats"></div>
+            <div class="dashboard-grid">
+                <div class="card" id="callsChartCard">
+                    <h3><i class="fa-solid fa-chart-bar"></i> Appels par jour</h3>
+                    <canvas id="callsChart"></canvas>
+                </div>
+                <div class="card" id="statusBreakdownCard">
+                    <h3><i class="fa-solid fa-chart-pie"></i> Repartition statuts</h3>
+                    <canvas id="statusChart"></canvas>
+                </div>
+                <div class="card" id="recentCallsCard">
+                    <h3><i class="fa-solid fa-clock-rotate-left"></i> Derniers appels</h3>
+                    <div id="recentCallsList"></div>
+                </div>
+                <div class="card" id="upcomingCallbacksCard">
+                    <h3><i class="fa-solid fa-calendar-check"></i> Prochains rappels</h3>
+                    <div id="upcomingCallbacksList"></div>
+                </div>
+            </div>
+        </section>
+
+        <!-- ============ SECTION: POWER DIALER ============ -->
+        <section class="content-section" id="section-dialer">
+            <div class="dialer-container">
+                <!-- Panneau gauche : info lead en cours -->
+                <div class="dialer-info-panel">
+                    <div class="card" id="currentLeadCard">
+                        <div class="lead-header">
+                            <h3 id="dialerBusinessName">Aucun lead charge</h3>
+                            <span id="dialerCategory" class="badge"></span>
+                        </div>
+                        <div class="lead-details">
+                            <p><i class="fa-solid fa-phone"></i> <span id="dialerPhone">—</span></p>
+                            <p><i class="fa-solid fa-location-dot"></i> <span id="dialerAddress">—</span></p>
+                            <p><i class="fa-solid fa-city"></i> <span id="dialerCity">—</span></p>
+                            <p><i class="fa-solid fa-star"></i> <span id="dialerRating">—</span> (<span id="dialerReviews">0</span> avis)</p>
+                            <p><i class="fa-solid fa-trophy"></i> Score : <span id="dialerScore">—</span></p>
+                        </div>
+                        <div class="lead-actions">
+                            <a id="dialerMapsLink" href="#" target="_blank" class="btn btn-sm btn-outline">
+                                <i class="fa-solid fa-map"></i> Google Maps
+                            </a>
+                        </div>
+                    </div>
+                    <!-- Historique appels pour ce lead -->
+                    <div class="card" id="leadHistoryCard">
+                        <h4>Historique</h4>
+                        <div id="leadCallHistory"></div>
+                    </div>
+                </div>
+
+                <!-- Panneau central : controles appel -->
+                <div class="dialer-control-panel">
+                    <div class="call-timer" id="callTimer">00:00</div>
+                    <div class="call-status" id="callStatus">En attente</div>
+                    <div class="dialer-buttons">
+                        <button id="btnStartSession" class="btn btn-lg btn-success" onclick="startDialerSession()">
+                            <i class="fa-solid fa-play"></i> Demarrer session
+                        </button>
+                        <button id="btnHangup" class="btn btn-lg btn-danger" onclick="hangupCall()" style="display:none">
+                            <i class="fa-solid fa-phone-slash"></i> Raccrocher
+                        </button>
+                        <button id="btnSkip" class="btn btn-lg btn-outline" onclick="skipLead()" style="display:none">
+                            <i class="fa-solid fa-forward"></i> Passer
+                        </button>
+                        <button id="btnPause" class="btn btn-lg btn-warning" onclick="pauseSession()" style="display:none">
+                            <i class="fa-solid fa-pause"></i> Pause
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Panneau droit : disposition + notes -->
+                <div class="dialer-disposition-panel">
+                    <div class="card">
+                        <h4>Statut de l'appel</h4>
+                        <div id="dispositionButtons" class="disposition-grid"></div>
+                    </div>
+                    <div class="card">
+                        <h4>Notes</h4>
+                        <textarea id="callNotes" placeholder="Notes sur l'appel..." rows="4"></textarea>
+                        <div class="form-group" style="margin-top:8px">
+                            <label>Email du contact</label>
+                            <input type="email" id="callEmail" placeholder="email@entreprise.fr">
+                        </div>
+                        <div class="form-group" style="margin-top:8px">
+                            <label>Date de rappel</label>
+                            <input type="datetime-local" id="callbackDate">
+                        </div>
+                        <button class="btn btn-primary" onclick="submitDisposition()" style="margin-top:12px;width:100%">
+                            <i class="fa-solid fa-check"></i> Valider & Suivant
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- ============ SECTION: LEADS ============ -->
+        <section class="content-section" id="section-leads">
+            <div class="filters-bar">
+                <select id="filterCity" onchange="loadLeads()">
+                    <option value="">Toutes les villes</option>
+                </select>
+                <select id="filterCategory" onchange="loadLeads()">
+                    <option value="">Toutes les categories</option>
+                </select>
+                <input type="number" id="filterMinScore" placeholder="Score min" min="0" max="100" onchange="loadLeads()">
+                <button class="btn btn-outline" onclick="exportLeads('csv')">
+                    <i class="fa-solid fa-file-csv"></i> Export CSV
+                </button>
+            </div>
+            <div id="leadsTable"></div>
+            <div id="leadsPagination" class="pagination"></div>
+        </section>
+
+        <!-- ============ SECTION: CALLBACKS ============ -->
+        <section class="content-section" id="section-callbacks">
+            <div class="card">
+                <h3>Rappels planifies</h3>
+                <div id="callbacksList"></div>
+            </div>
+        </section>
+
+        <!-- ============ SECTION: SCRAPER ============ -->
+        <section class="content-section" id="section-scraper">
+            <div class="scraper-controls card">
+                <h3><i class="fa-solid fa-spider"></i> Controle du Scraper</h3>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>Ville cible</label>
+                        <input type="text" id="scraperCity" value="Toulouse" placeholder="ex: Toulouse, Albi...">
+                    </div>
+                    <div class="form-group">
+                        <label>Categorie</label>
+                        <input type="text" id="scraperCategory" value="restaurant" placeholder="ex: restaurant, coiffeur...">
+                    </div>
+                    <button class="btn btn-success" onclick="startScraper()">
+                        <i class="fa-solid fa-play"></i> Lancer
+                    </button>
+                    <button class="btn btn-danger" onclick="stopScraper()">
+                        <i class="fa-solid fa-stop"></i> Arreter
+                    </button>
+                </div>
+            </div>
+            <div class="stats-grid" id="scraperStats"></div>
+            <div class="card">
+                <h3>Resultats en temps reel</h3>
+                <div id="scraperFeed" class="scraper-feed"></div>
+            </div>
+        </section>
+
+        <!-- ============ SECTION: STATISTIQUES ============ -->
+        <section class="content-section" id="section-stats">
+            <div class="stats-grid" id="fullStats"></div>
+            <div class="dashboard-grid">
+                <div class="card">
+                    <h3>Heatmap horaire (meilleurs creneaux)</h3>
+                    <div id="heatmapContainer"></div>
+                </div>
+            </div>
+        </section>
+
+        <!-- ============ SECTION: PARAMETRES ============ -->
+        <section class="content-section" id="section-settings">
+            <div class="card">
+                <h3>Configuration Twilio</h3>
+                <div class="form-group">
+                    <label>Account SID</label>
+                    <input type="text" id="settingTwilioSid" placeholder="ACxxxxxxxx">
+                </div>
+                <div class="form-group">
+                    <label>Auth Token</label>
+                    <input type="password" id="settingTwilioToken" placeholder="Token Twilio">
+                </div>
+                <div class="form-group">
+                    <label>Numero sortant (+33...)</label>
+                    <input type="text" id="settingTwilioPhone" placeholder="+33123456789">
+                </div>
+                <button class="btn btn-primary" onclick="saveSettings()">
+                    <i class="fa-solid fa-save"></i> Enregistrer
+                </button>
+            </div>
+            <div class="card">
+                <h3>Configuration Scraper</h3>
+                <div class="form-group">
+                    <label>Cle API Outscraper</label>
+                    <input type="password" id="settingOutscraperKey" placeholder="Cle API">
+                </div>
+                <div class="form-group">
+                    <label>Cle API Foursquare</label>
+                    <input type="password" id="settingFoursquareKey" placeholder="Cle API">
+                </div>
+                <button class="btn btn-primary" onclick="saveSettings()">
+                    <i class="fa-solid fa-save"></i> Enregistrer
+                </button>
+            </div>
+        </section>
+    </main>
+
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+    <script src="/js/app.js"></script>
+</body>
+</html>

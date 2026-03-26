@@ -1,0 +1,75 @@
+# ============================================
+# Cold Call Platform — Docker Compose
+# URL unique : http://localhost:8092
+# Nginx reverse proxy : / → frontend, /api → backend
+# ============================================
+
+services:
+  # --- Base de donnees PostgreSQL ---
+  db:
+    image: postgres:16-alpine
+    restart: always
+    environment:
+      POSTGRES_USER: coldcall
+      POSTGRES_PASSWORD: coldcall_dev_2026
+      POSTGRES_DB: coldcall
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "5433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U coldcall"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # --- Redis (cache + message queue) ---
+  redis:
+    image: redis:7-alpine
+    restart: always
+    ports:
+      - "6380:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # --- Backend API FastAPI ---
+  api:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    restart: always
+    expose:
+      - "8000"
+    environment:
+      DATABASE_URL: postgresql+asyncpg://coldcall:coldcall_dev_2026@db:5432/coldcall
+      REDIS_URL: redis://redis:6379/0
+      APP_ENV: development
+      APP_DEBUG: "true"
+      APP_URL: http://localhost:8092
+      CORS_ORIGINS: "http://localhost:8092"
+      JWT_SECRET_KEY: dev-secret-change-in-production-openssl-rand-hex-32
+    volumes:
+      - ./backend/app:/app/app
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  # --- Nginx (reverse proxy + frontend statique) ---
+  nginx:
+    image: nginx:alpine
+    restart: always
+    ports:
+      - "8092:80"
+    volumes:
+      - ./frontend/public:/usr/share/nginx/html:ro
+      - ./frontend/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      - api
+
+volumes:
+  pgdata:
