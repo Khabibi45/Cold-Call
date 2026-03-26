@@ -64,7 +64,7 @@ services:
     image: nginx:alpine
     restart: always
     ports:
-      - "8092:80"
+      - "8100:80"
     volumes:
       - ./frontend/public:/usr/share/nginx/html:ro
       - ./frontend/nginx.conf:/etc/nginx/conf.d/default.conf:ro
