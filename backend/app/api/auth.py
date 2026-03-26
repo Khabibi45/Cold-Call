@@ -1,17 +1,24 @@
 """
-API Auth — Inscription, connexion, OAuth2 Google/GitHub.
+API Auth — Inscription, connexion, refresh token, logout, profil utilisateur.
 JWT access token (15min) + refresh token en cookie httpOnly.
 """
 
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, Response
+from fastapi import APIRouter, Cookie, Depends, HTTPException, Response
 from pydantic import BaseModel, EmailStr
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
-from app.core.security import hash_password, verify_password, create_access_token, create_refresh_token, decode_token
+from app.core.deps import get_current_user
+from app.core.security import (
+    hash_password,
+    verify_password,
+    create_access_token,
+    create_refresh_token,
+    decode_token,
+)
 from app.models.user import User
 
 router = APIRouter()
@@ -81,14 +88,87 @@ async def login(data: LoginRequest, response: Response, db: AsyncSession = Depen
 
 
 @router.post("/refresh")
-async def refresh_token(response: Response):
-    """Renouvelle l'access token via le refresh token en cookie."""
-    # Note: implementation complete avec cookie parsing dans la version finale
-    return {"message": "Endpoint refresh token — a implementer avec middleware cookie"}
+async def refresh(
+    response: Response,
+    refresh_token: str | None = Cookie(default=None),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Renouvelle l'access token via le refresh token stocke en cookie httpOnly.
+    Verifie que le token est de type 'refresh' et que l'utilisateur existe toujours.
+    """
+    if not refresh_token:
+        raise HTTPException(401, "Refresh token manquant")
+
+    # Decoder et valider le refresh token
+    payload = decode_token(refresh_token)
+    if payload is None:
+        raise HTTPException(401, "Refresh token invalide ou expire")
+
+    # Verifier que c'est bien un refresh token
+    if payload.get("type") != "refresh":
+        raise HTTPException(401, "Token de mauvais type")
+
+    # Verifier que l'utilisateur existe toujours et est actif
+    user_id_str = payload.get("sub")
+    if not user_id_str:
+        raise HTTPException(401, "Refresh token invalide")
+
+    try:
+        user_id = int(user_id_str)
+    except (ValueError, TypeError):
+        raise HTTPException(401, "Refresh token invalide")
+
+    user = await db.get(User, user_id)
+    if not user:
+        raise HTTPException(401, "Utilisateur introuvable")
+
+    if not user.is_active:
+        raise HTTPException(403, "Compte desactive")
+
+    # Generer un nouveau access token
+    token_data = {"sub": str(user.id), "email": user.email}
+    new_access_token = create_access_token(token_data)
+
+    # Rotation du refresh token (securite : nouveau refresh a chaque refresh)
+    new_refresh_token = create_refresh_token(token_data)
+    response.set_cookie(
+        key="refresh_token",
+        value=new_refresh_token,
+        httponly=True,
+        secure=True,
+        samesite="lax",
+        max_age=60 * 60 * 24 * 30,
+    )
+
+    return {
+        "access_token": new_access_token,
+        "token_type": "bearer",
+    }
 
 
 @router.get("/me")
-async def get_current_user():
-    """Retourne l'utilisateur connecte. Protege par JWT."""
-    # Note: implementation complete avec dependency injection JWT
-    return {"message": "Endpoint user info — protege par JWT middleware"}
+async def me(current_user: User = Depends(get_current_user)):
+    """Retourne les informations de l'utilisateur connecte. Protege par JWT."""
+    return {
+        "id": current_user.id,
+        "email": current_user.email,
+        "name": current_user.name,
+        "avatar_url": current_user.avatar_url,
+        "is_admin": current_user.is_admin,
+        "subscription_plan": current_user.subscription_plan,
+        "created_at": current_user.created_at.isoformat() if current_user.created_at else None,
+        "last_login": current_user.last_login.isoformat() if current_user.last_login else None,
+    }
+
+
+@router.post("/logout")
+async def logout(response: Response):
+    """Deconnexion — supprime le cookie refresh_token."""
+    response.delete_cookie(
+        key="refresh_token",
+        httponly=True,
+        secure=True,
+        samesite="lax",
+    )
+    return {"message": "Deconnecte avec succes"}

@@ -10,14 +10,16 @@ from sqlalchemy import select, func, extract, cast, Date
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
+from app.core.deps import get_current_user
 from app.models.call import Call
 from app.models.lead import Lead
+from app.models.user import User
 
 router = APIRouter()
 
 
 @router.get("/overview")
-async def stats_overview(db: AsyncSession = Depends(get_db)):
+async def stats_overview(db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)):
     """Stats globales de la plateforme."""
     total_leads = (await db.execute(select(func.count(Lead.id)))).scalar() or 0
     leads_sans_site = (await db.execute(select(func.count(Lead.id)).where(Lead.has_website == False))).scalar() or 0
@@ -43,6 +45,7 @@ async def stats_overview(db: AsyncSession = Depends(get_db)):
 async def calls_per_day(
     days: int = Query(30, ge=1, le=365),
     db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     """Nombre d'appels par jour sur les N derniers jours."""
     since = datetime.now(timezone.utc) - timedelta(days=days)
@@ -62,6 +65,7 @@ async def calls_per_day(
 async def status_breakdown(
     days: int = Query(30, ge=1, le=365),
     db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     """Repartition des statuts d'appel."""
     since = datetime.now(timezone.utc) - timedelta(days=days)
@@ -78,6 +82,7 @@ async def status_breakdown(
 async def hourly_heatmap(
     days: int = Query(30, ge=1, le=365),
     db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     """Heatmap des appels connectes par heure (pour trouver les meilleurs creneaux)."""
     since = datetime.now(timezone.utc) - timedelta(days=days)

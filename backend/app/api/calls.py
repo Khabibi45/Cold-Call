@@ -4,14 +4,16 @@ API Calls — Enregistrement d'appels, statuts, notes, planning.
 
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
-from sqlalchemy import select, update
+from sqlalchemy import select, update, func, desc
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
+from app.core.deps import get_current_user
 from app.models.call import Call, CALL_STATUSES
 from app.models.lead import Lead
+from app.models.user import User
 
 router = APIRouter()
 
@@ -34,9 +36,72 @@ class CallUpdate(BaseModel):
     callback_at: datetime | None = None
 
 
+@router.get("/")
+async def list_calls(
+    status: str | None = Query(None, description="Filtrer par statut d'appel"),
+    lead_id: int | None = Query(None, description="Filtrer par lead"),
+    date_from: datetime | None = Query(None, description="Date de debut (ISO 8601)"),
+    date_to: datetime | None = Query(None, description="Date de fin (ISO 8601)"),
+    page: int = Query(1, ge=1),
+    per_page: int = Query(50, ge=1, le=200),
+    db: AsyncSession = Depends(get_db),
+):
+    """Liste paginee de tous les appels avec filtres optionnels."""
+    query = select(Call)
+
+    # Filtres
+    if status:
+        if status not in CALL_STATUSES:
+            raise HTTPException(400, f"Statut invalide. Statuts valides: {list(CALL_STATUSES.keys())}")
+        query = query.where(Call.status == status)
+    if lead_id:
+        query = query.where(Call.lead_id == lead_id)
+    if date_from:
+        query = query.where(Call.started_at >= date_from)
+    if date_to:
+        query = query.where(Call.started_at <= date_to)
+
+    # Comptage total
+    count_query = select(func.count()).select_from(query.subquery())
+    total = (await db.execute(count_query)).scalar() or 0
+
+    # Pagination + tri par date desc
+    query = query.order_by(desc(Call.started_at)).offset((page - 1) * per_page).limit(per_page)
+    result = await db.execute(query)
+    calls = result.scalars().all()
+
+    return {
+        "total": total,
+        "page": page,
+        "per_page": per_page,
+        "pages": (total + per_page - 1) // per_page,
+        "data": [
+            {
+                "id": c.id,
+                "lead_id": c.lead_id,
+                "user_id": c.user_id,
+                "business_name": c.lead.business_name if c.lead else None,
+                "phone": c.lead.phone if c.lead else None,
+                "status": c.status,
+                "duration_seconds": c.duration_seconds,
+                "notes": c.notes,
+                "contact_email": c.contact_email,
+                "callback_at": c.callback_at.isoformat() if c.callback_at else None,
+                "started_at": c.started_at.isoformat() if c.started_at else None,
+                "ended_at": c.ended_at.isoformat() if c.ended_at else None,
+            }
+            for c in calls
+        ],
+    }
+
+
 @router.post("/")
-async def create_call(data: CallCreate, db: AsyncSession = Depends(get_db)):
-    """Enregistre un nouvel appel avec son statut."""
+async def create_call(
+    data: CallCreate,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Enregistre un nouvel appel avec son statut. user_id rempli automatiquement via JWT."""
     if data.status not in CALL_STATUSES:
         raise HTTPException(400, f"Statut invalide. Statuts valides: {list(CALL_STATUSES.keys())}")
 
@@ -47,6 +112,7 @@ async def create_call(data: CallCreate, db: AsyncSession = Depends(get_db)):
 
     call = Call(
         lead_id=data.lead_id,
+        user_id=current_user.id,
         status=data.status,
         duration_seconds=data.duration_seconds,
         notes=data.notes,
@@ -70,7 +136,7 @@ async def create_call(data: CallCreate, db: AsyncSession = Depends(get_db)):
 
 
 @router.patch("/{call_id}")
-async def update_call(call_id: int, data: CallUpdate, db: AsyncSession = Depends(get_db)):
+async def update_call(call_id: int, data: CallUpdate, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)):
     """Met a jour un appel existant (statut, notes, callback)."""
     call = await db.get(Call, call_id)
     if not call:
@@ -91,6 +157,34 @@ async def update_call(call_id: int, data: CallUpdate, db: AsyncSession = Depends
     return {"id": call.id, "status": call.status, "updated": True}
 
 
+@router.get("/recent")
+async def recent_calls(
+    limit: int = Query(10, ge=1, le=50),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Les N derniers appels passes, avec info du lead."""
+    result = await db.execute(
+        select(Call)
+        .order_by(desc(Call.started_at))
+        .limit(limit)
+    )
+    calls = result.scalars().all()
+    return [
+        {
+            "id": c.id,
+            "lead_id": c.lead_id,
+            "business_name": c.lead.business_name if c.lead else None,
+            "phone": c.lead.phone if c.lead else None,
+            "status": c.status,
+            "duration_seconds": c.duration_seconds,
+            "started_at": c.started_at.isoformat() if c.started_at else None,
+            "notes": c.notes,
+        }
+        for c in calls
+    ]
+
+
 @router.get("/statuses")
 async def get_statuses():
     """Retourne tous les statuts d'appel disponibles avec leur config."""
@@ -98,7 +192,7 @@ async def get_statuses():
 
 
 @router.get("/callbacks")
-async def get_callbacks(db: AsyncSession = Depends(get_db)):
+async def get_callbacks(db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)):
     """Liste les rappels planifies (callbacks a venir)."""
     result = await db.execute(
         select(Call)
@@ -119,3 +213,28 @@ async def get_callbacks(db: AsyncSession = Depends(get_db)):
         }
         for c in calls
     ]
+
+
+@router.get("/{call_id}")
+async def get_call(call_id: int, db: AsyncSession = Depends(get_db)):
+    """Detail complet d'un appel avec les informations du lead associe."""
+    call = await db.get(Call, call_id)
+    if not call:
+        raise HTTPException(404, "Appel introuvable")
+
+    return {
+        "id": call.id,
+        "lead_id": call.lead_id,
+        "user_id": call.user_id,
+        "business_name": call.lead.business_name if call.lead else None,
+        "phone": call.lead.phone if call.lead else None,
+        "status": call.status,
+        "duration_seconds": call.duration_seconds,
+        "notes": call.notes,
+        "contact_email": call.contact_email,
+        "callback_at": call.callback_at.isoformat() if call.callback_at else None,
+        "started_at": call.started_at.isoformat() if call.started_at else None,
+        "ended_at": call.ended_at.isoformat() if call.ended_at else None,
+        "twilio_call_sid": call.twilio_call_sid,
+        "recording_url": call.recording_url,
+    }

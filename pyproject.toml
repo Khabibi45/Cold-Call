@@ -1,0 +1,17 @@
+[tool.pytest.ini_options]
+# Configuration pytest pour Cold Call Platform
+asyncio_mode = "auto"
+testpaths = ["tests"]
+pythonpath = ["backend"]
+filterwarnings = [
+    "ignore::DeprecationWarning",
+]
+
+[tool.coverage.run]
+source = ["backend/app"]
+omit = ["tests/*", "*/migrations/*"]
+
+[tool.coverage.report]
+show_missing = true
+skip_empty = true
+fail_under = 0
