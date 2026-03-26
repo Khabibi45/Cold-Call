@@ -23,6 +23,8 @@ from tenacity import (
 from sqlalchemy import text, select, and_
 from sqlalchemy.ext.asyncio import AsyncSession
 
+import redis.asyncio as aioredis
+
 from app.core.config import get_settings
 from app.core.database import async_session
 from app.models.lead import Lead
@@ -31,6 +33,83 @@ from app.services.dedup import DeduplicationService
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
+
+# ============================================
+# CAP MENSUEL API — HARD LIMIT 10 000 REQUETES / MOIS
+# Impossible a depasser. Aucune facturation possible.
+# ============================================
+MONTHLY_API_CAP = 10_000  # NE PAS MODIFIER — protection contre la facturation
+
+
+class APICapExceeded(Exception):
+    """Levee quand le cap mensuel de requetes API est atteint."""
+    pass
+
+
+class APICap:
+    """Compteur mensuel de requetes API stocke dans Redis.
+    Bloque TOUTE requete au-dela de MONTHLY_API_CAP."""
+
+    REDIS_KEY_PREFIX = "api_cap"
+
+    def __init__(self):
+        self._redis: aioredis.Redis | None = None
+
+    async def _get_redis(self) -> aioredis.Redis:
+        if self._redis is None:
+            self._redis = aioredis.from_url(settings.redis_url)
+        return self._redis
+
+    def _current_key(self) -> str:
+        """Cle Redis unique par mois : api_cap:2026-03"""
+        month = datetime.now(timezone.utc).strftime("%Y-%m")
+        return f"{self.REDIS_KEY_PREFIX}:{month}"
+
+    async def get_count(self) -> int:
+        """Nombre de requetes API ce mois-ci."""
+        r = await self._get_redis()
+        val = await r.get(self._current_key())
+        return int(val) if val else 0
+
+    async def increment(self, amount: int = 1) -> int:
+        """Incremente le compteur. Retourne le nouveau total."""
+        r = await self._get_redis()
+        key = self._current_key()
+        new_val = await r.incrby(key, amount)
+        # Expiration auto a 35 jours (nettoyage des vieux mois)
+        await r.expire(key, 60 * 60 * 24 * 35)
+        return new_val
+
+    async def remaining(self) -> int:
+        """Requetes restantes ce mois-ci."""
+        count = await self.get_count()
+        return max(0, MONTHLY_API_CAP - count)
+
+    async def check_or_raise(self, needed: int = 1) -> None:
+        """Verifie qu'on a assez de credits. Leve APICapExceeded sinon."""
+        remaining = await self.remaining()
+        if remaining < needed:
+            raise APICapExceeded(
+                f"CAP MENSUEL ATTEINT : {await self.get_count()}/{MONTHLY_API_CAP} requetes utilisees. "
+                f"Reste {remaining}. Le scraper est BLOQUE jusqu'au mois prochain. "
+                f"Aucun frais ne sera facture."
+            )
+
+    async def stats(self) -> dict:
+        """Stats du cap mensuel."""
+        count = await self.get_count()
+        return {
+            "month": datetime.now(timezone.utc).strftime("%Y-%m"),
+            "used": count,
+            "remaining": max(0, MONTHLY_API_CAP - count),
+            "cap": MONTHLY_API_CAP,
+            "percent_used": round(count / MONTHLY_API_CAP * 100, 1) if MONTHLY_API_CAP > 0 else 0,
+            "blocked": count >= MONTHLY_API_CAP,
+        }
+
+
+# Singleton global
+_api_cap = APICap()
 
 # --- Categories Tier pour le scoring ---
 TIER_1 = {
@@ -390,9 +469,15 @@ class ScraperService:
     async def scrape_outscraper(self, query: str, city: str, limit: int = 100, skip: int = 0) -> list[dict]:
         """Appelle l'API Outscraper Google Maps Search.
         Parametre skip pour la pagination — evite de rescraper les memes fiches.
+        VERIFIE LE CAP MENSUEL AVANT CHAQUE APPEL.
         """
         if not self.is_outscraper_configured:
             raise ValueError("OUTSCRAPER_API_KEY non configuree")
+
+        # --- CAP MENSUEL : verification obligatoire ---
+        await _api_cap.check_or_raise(needed=1)
+        await _api_cap.increment(1)
+        logger.info("api_cap_outscraper", **(await _api_cap.stats()))
 
         search_query = f"{query} {city}"
         url = "https://api.app.outscraper.com/maps/search-v3"
@@ -461,9 +546,16 @@ class ScraperService:
         ),
     )
     async def scrape_foursquare(self, query: str, city: str, limit: int = 50) -> list[dict]:
-        """Appelle l'API Foursquare Places Search."""
+        """Appelle l'API Foursquare Places Search.
+        VERIFIE LE CAP MENSUEL AVANT CHAQUE APPEL.
+        """
         if not self.is_foursquare_configured:
             raise ValueError("FOURSQUARE_API_KEY non configuree")
+
+        # --- CAP MENSUEL : verification obligatoire ---
+        await _api_cap.check_or_raise(needed=1)
+        await _api_cap.increment(1)
+        logger.info("api_cap_foursquare", **(await _api_cap.stats()))
 
         url = "https://api.foursquare.com/v3/places/search"
         params = {

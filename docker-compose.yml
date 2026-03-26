@@ -51,6 +51,7 @@ services:
       APP_URL: http://localhost:8092
       CORS_ORIGINS: "http://localhost:8092"
       JWT_SECRET_KEY: dev-secret-change-in-production-openssl-rand-hex-32
+      FOURSQUARE_API_KEY: G31ZMJ1LWBBGR1CSLPPZY5QY2TFE2RWU3OBBDL5THANIZ24H
     volumes:
       - ./backend/app:/app/app
     depends_on:

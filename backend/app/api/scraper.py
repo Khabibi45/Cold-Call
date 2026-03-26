@@ -6,12 +6,19 @@ Historique des jobs, suggestions de queries, memoire persistante.
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 
-from app.services.scraper import ScraperService
+from app.services.scraper import ScraperService, _api_cap, APICapExceeded
 
 router = APIRouter()
 
 # Instance unique du scraper (partage entre les endpoints)
 _scraper = ScraperService()
+
+
+@router.get("/cap")
+async def api_cap_status():
+    """Retourne le statut du cap mensuel API (10 000 requetes/mois max).
+    Si blocked=true, le scraper est ARRETE et aucun frais ne sera facture."""
+    return await _api_cap.stats()
 
 
 class ScrapeRequest(BaseModel):
@@ -29,6 +36,15 @@ async def start_scrape(req: ScrapeRequest):
     """
     if _scraper.status["running"]:
         raise HTTPException(status_code=409, detail="Un scrape est deja en cours")
+
+    # --- CAP MENSUEL : bloquer si le cap est atteint ---
+    cap_stats = await _api_cap.stats()
+    if cap_stats["blocked"]:
+        raise HTTPException(
+            status_code=429,
+            detail=f"CAP MENSUEL ATTEINT : {cap_stats['used']}/{cap_stats['cap']} requetes utilisees. "
+                   f"Le scraper est bloque jusqu'au mois prochain. Aucun frais ne sera facture.",
+        )
 
     # Verifier qu'au moins une API est configuree avant de lancer
     if not _scraper.is_any_api_configured:
