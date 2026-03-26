@@ -63,6 +63,9 @@ function initNavigation() {
                 case 'stats':
                     loadStatsPage();
                     break;
+                case 'profil':
+                    loadProfil();
+                    break;
             }
         });
     });
@@ -555,22 +558,25 @@ function renderCallbackItems(callbacks, compact) {
     }).join('');
 }
 
-function dialCallback(leadId) {
-    // Basculer vers le dialer
-    document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
-    document.querySelector('[data-section="dialer"]').classList.add('active');
-    document.querySelectorAll('.content-section').forEach(s => s.classList.remove('active'));
-    document.getElementById('section-dialer').classList.add('active');
-    document.getElementById('pageTitle').textContent = 'Power Dialer';
-    // Charger ce lead specifiquement
-    loadSpecificLead(leadId);
-}
+async function dialCallback(leadId) {
+    // Switcher vers l'onglet dialer
+    document.querySelector('.nav-item[data-section="dialer"]').click();
 
-async function loadSpecificLead(leadId) {
-    const data = await apiFetch(`/leads/?page=1&per_page=1`);
-    // Idealement il faudrait un endpoint GET /leads/:id — on simule
-    // Pour l'instant on lance la session normalement
-    startDialerSession();
+    // Charger le lead specifique
+    const lead = await apiFetch(`/leads/${leadId}`);
+    if (lead) {
+        currentLead = lead;
+        displayCurrentLead(lead);
+
+        // Montrer les controles
+        document.getElementById('btnStartSession').style.display = 'none';
+        document.getElementById('btnHangup').style.display = '';
+        document.getElementById('btnSkip').style.display = '';
+        document.getElementById('btnPause').style.display = '';
+
+        // Lancer l'appel
+        makeRealCall();
+    }
 }
 
 // ============================================
@@ -1085,9 +1091,12 @@ function displayCurrentLead(lead) {
     document.getElementById('dialerRating').textContent = lead.rating || '—';
     document.getElementById('dialerReviews').textContent = lead.review_count || 0;
     document.getElementById('dialerScore').textContent = lead.lead_score || 0;
+    const mapsLink = document.getElementById('dialerMapsLink');
     if (lead.maps_url) {
-        document.getElementById('dialerMapsLink').href = lead.maps_url;
-        document.getElementById('dialerMapsLink').style.display = '';
+        mapsLink.href = lead.maps_url;
+        mapsLink.style.display = '';
+    } else {
+        mapsLink.style.display = 'none';
     }
     // Reset disposition
     selectedDisposition = null;
@@ -1234,11 +1243,22 @@ async function submitDisposition() {
 // ============================================
 let currentSortBy = 'score';
 let currentSortOrder = 'desc';
+let searchDebounce = null;
+
+/**
+ * Debounce sur la recherche texte pour eviter de spammer l'API
+ */
+function debounceLoadLeads() {
+    clearTimeout(searchDebounce);
+    searchDebounce = setTimeout(() => loadLeads(), 300);
+}
 
 async function loadLeads(page = 1) {
     const city = document.getElementById('filterCity')?.value || '';
     const category = document.getElementById('filterCategory')?.value || '';
     const minScore = document.getElementById('filterMinScore')?.value || 0;
+
+    const search = document.getElementById('filterSearch')?.value || '';
 
     const params = new URLSearchParams({
         page,
@@ -1250,6 +1270,7 @@ async function loadLeads(page = 1) {
     if (city) params.set('city', city);
     if (category) params.set('category', category);
     if (minScore > 0) params.set('min_score', minScore);
+    if (search) params.set('search', search);
 
     const data = await apiFetch(`/leads/?${params}`);
     if (!data) return;
@@ -1778,15 +1799,25 @@ function applySuggestion(query, city) {
 // SETTINGS
 // ============================================
 function saveSettings() {
+    // Les cles API sont sensibles — on les affiche dans l'UI mais on les envoie au backend
+    // Pour l'instant on les garde en localStorage (TODO: endpoint backend)
     const settings = {
-        twilio_sid: document.getElementById('settingTwilioSid')?.value,
-        twilio_token: document.getElementById('settingTwilioToken')?.value,
-        twilio_phone: document.getElementById('settingTwilioPhone')?.value,
-        outscraper_key: document.getElementById('settingOutscraperKey')?.value,
-        foursquare_key: document.getElementById('settingFoursquareKey')?.value,
+        twilio_sid: document.getElementById('settingTwilioSid')?.value || '',
+        twilio_token: document.getElementById('settingTwilioToken')?.value || '',
+        twilio_phone: document.getElementById('settingTwilioPhone')?.value || '',
+        outscraper_key: document.getElementById('settingOutscraperKey')?.value || '',
+        foursquare_key: document.getElementById('settingFoursquareKey')?.value || '',
     };
     localStorage.setItem('coldcall_settings', JSON.stringify(settings));
-    alert('Parametres enregistres');
+
+    // Feedback visuel au lieu d'un alert()
+    const btn = event.target.closest('.btn');
+    if (btn) {
+        const old = btn.innerHTML;
+        btn.innerHTML = '<i class="fa-solid fa-check"></i> Enregistre !';
+        btn.style.background = 'var(--success)';
+        setTimeout(() => { btn.innerHTML = old; btn.style.background = ''; }, 2000);
+    }
 }
 
 // ============================================
@@ -1820,6 +1851,90 @@ async function loadAgentPhone() {
         const selectEl = document.getElementById('settingDialMode');
         if (selectEl) selectEl.value = savedMode;
     }
+}
+
+// ============================================
+// PROFIL
+// ============================================
+async function loadProfil() {
+    const me = await apiFetch('/auth/me');
+    if (!me) return;
+
+    // Remplir les champs
+    document.getElementById('profilName').value = me.name || '';
+    document.getElementById('profilEmail').value = me.email || '';
+    document.getElementById('profilPhone').value = me.phone_number || '';
+
+    // Mode d'appel depuis localStorage
+    const mode = localStorage.getItem('dialMode') || 'phone';
+    document.getElementById('profilDialMode').value = mode;
+
+    // Stats personnelles
+    const stats = await apiFetch('/stats/overview');
+    if (stats) {
+        document.getElementById('profilStats').innerHTML = renderStatCards([
+            { label: 'Appels passes', value: stats.total_calls, icon: 'fa-phone', color: 'var(--accent)' },
+            { label: 'RDV pris', value: stats.total_meetings, icon: 'fa-calendar-check', color: 'var(--success)' },
+            { label: 'Taux conversion', value: stats.conversion_rate + '%', icon: 'fa-chart-line', color: '#a855f7' },
+            { label: 'Appels aujourd\'hui', value: stats.calls_today || 0, icon: 'fa-clock', color: 'var(--warning)' },
+        ]);
+    }
+
+    // Activite recente
+    const recent = await apiFetch('/calls/recent?limit=5');
+    if (recent && recent.length) {
+        document.getElementById('profilRecentActivity').innerHTML = recent.map(c => `
+            <div style="display:flex;align-items:center;justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--border)">
+                <div>
+                    <div style="font-weight:600;font-size:0.88rem">${c.business_name || 'Inconnu'}</div>
+                    <div style="font-size:0.75rem;color:var(--text-muted)">${c.started_at ? new Date(c.started_at).toLocaleString('fr-FR') : ''}</div>
+                </div>
+                <span style="padding:2px 8px;border-radius:6px;font-size:0.72rem;font-weight:600;background:${(CALL_STATUSES[c.status]||{}).color || '#6b7280'}22;color:${(CALL_STATUSES[c.status]||{}).color || '#6b7280'}">${(CALL_STATUSES[c.status]||{}).label || c.status}</span>
+            </div>
+        `).join('');
+    } else {
+        document.getElementById('profilRecentActivity').innerHTML = '<p style="color:var(--text-muted);font-size:0.85rem">Aucune activite recente</p>';
+    }
+}
+
+async function saveProfile() {
+    const name = document.getElementById('profilName').value;
+    const phone = document.getElementById('profilPhone').value;
+    const mode = document.getElementById('profilDialMode').value;
+
+    // Sauvegarder le telephone
+    await apiFetch('/auth/me/phone', {
+        method: 'PATCH',
+        body: JSON.stringify({ phone_number: phone })
+    });
+
+    // Sauvegarder le mode d'appel
+    dialMode = mode;
+    localStorage.setItem('dialMode', mode);
+
+    // Feedback visuel (pas d'alert())
+    const status = document.getElementById('profilSaveStatus');
+    if (status) {
+        status.style.display = 'inline';
+        setTimeout(() => status.style.display = 'none', 2500);
+    }
+}
+
+async function changePassword() {
+    const newPw = document.getElementById('profilNewPassword').value;
+    const confirm = document.getElementById('profilConfirmPassword').value;
+
+    if (!newPw || newPw.length < 6) {
+        alert('Le mot de passe doit faire au moins 6 caracteres');
+        return;
+    }
+    if (newPw !== confirm) {
+        alert('Les mots de passe ne correspondent pas');
+        return;
+    }
+
+    // TODO: implementer l'endpoint PATCH /auth/me/password dans le backend
+    alert('Fonctionnalite bientot disponible');
 }
 
 // ============================================

@@ -96,6 +96,10 @@
                     <i class="fa-solid fa-chart-pie"></i>
                     <span>Statistiques</span>
                 </li>
+                <li class="nav-item" data-section="profil">
+                    <i class="fa-solid fa-circle-user"></i>
+                    <span>Profil</span>
+                </li>
                 <li class="nav-item" data-section="settings">
                     <i class="fa-solid fa-gear"></i>
                     <span>Parametres</span>
@@ -165,7 +169,7 @@
                             <p><i class="fa-solid fa-trophy"></i> Score : <span id="dialerScore">—</span></p>
                         </div>
                         <div class="lead-actions">
-                            <a id="dialerMapsLink" href="#" target="_blank" class="btn btn-sm btn-outline">
+                            <a id="dialerMapsLink" href="#" target="_blank" class="btn btn-sm btn-outline" style="display:none">
                                 <i class="fa-solid fa-map"></i> Google Maps
                             </a>
                         </div>
@@ -219,7 +223,7 @@
                             <input type="email" id="callEmail" placeholder="email@entreprise.fr">
                         </div>
                         <div class="form-group" style="margin-top:8px">
-                            <label>Date de rappel</label>
+                            <label>Date et heure du rappel (optionnel)</label>
                             <input type="datetime-local" id="callbackDate">
                         </div>
                         <button class="btn btn-primary" onclick="submitDisposition()" style="margin-top:12px;width:100%">
@@ -233,6 +237,7 @@
         <!-- ============ SECTION: LEADS ============ -->
         <section class="content-section" id="section-leads">
             <div class="filters-bar">
+                <input type="text" id="filterSearch" placeholder="Rechercher une entreprise..." oninput="debounceLoadLeads()" style="flex:2;min-width:200px">
                 <select id="filterCity" onchange="loadLeads()">
                     <option value="">Toutes les villes</option>
                 </select>
@@ -305,25 +310,72 @@
             </div>
         </section>
 
+        <!-- ============ SECTION: PROFIL ============ -->
+        <section class="content-section" id="section-profil">
+            <div class="section-header" style="margin-bottom:20px">
+                <h2>Mon Profil</h2>
+            </div>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
+                <div class="card">
+                    <h3><i class="fa-solid fa-user"></i> Informations</h3>
+                    <div class="form-group" style="margin-bottom:12px">
+                        <label>Nom</label>
+                        <input type="text" id="profilName" placeholder="Ton nom">
+                    </div>
+                    <div class="form-group" style="margin-bottom:12px">
+                        <label>Email</label>
+                        <input type="email" id="profilEmail" disabled style="opacity:0.6">
+                    </div>
+                    <div class="form-group" style="margin-bottom:12px">
+                        <label>Telephone (pour Click-to-Call)</label>
+                        <input type="tel" id="profilPhone" placeholder="+33612345678">
+                    </div>
+                    <div class="form-group" style="margin-bottom:12px">
+                        <label>Mode d'appel</label>
+                        <select id="profilDialMode">
+                            <option value="phone">Telephone (Click-to-Call)</option>
+                            <option value="browser">Navigateur (WebRTC)</option>
+                        </select>
+                    </div>
+                    <button class="btn btn-primary" onclick="saveProfile()">
+                        <i class="fa-solid fa-save"></i> Enregistrer
+                    </button>
+                    <span id="profilSaveStatus" style="margin-left:12px;font-size:0.82rem;color:var(--success);display:none">
+                        <i class="fa-solid fa-check"></i> Enregistre !
+                    </span>
+                </div>
+                <div class="card">
+                    <h3><i class="fa-solid fa-chart-simple"></i> Mes statistiques</h3>
+                    <div id="profilStats"></div>
+                </div>
+                <div class="card">
+                    <h3><i class="fa-solid fa-clock-rotate-left"></i> Activite recente</h3>
+                    <div id="profilRecentActivity"></div>
+                </div>
+                <div class="card">
+                    <h3><i class="fa-solid fa-key"></i> Securite</h3>
+                    <div class="form-group" style="margin-bottom:12px">
+                        <label>Nouveau mot de passe</label>
+                        <input type="password" id="profilNewPassword" placeholder="********">
+                    </div>
+                    <div class="form-group" style="margin-bottom:12px">
+                        <label>Confirmer</label>
+                        <input type="password" id="profilConfirmPassword" placeholder="********">
+                    </div>
+                    <button class="btn btn-outline" onclick="changePassword()">
+                        <i class="fa-solid fa-lock"></i> Changer le mot de passe
+                    </button>
+                    <div style="margin-top:20px;padding-top:16px;border-top:1px solid var(--border)">
+                        <button class="btn btn-danger" onclick="logout()">
+                            <i class="fa-solid fa-right-from-bracket"></i> Deconnexion
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </section>
+
         <!-- ============ SECTION: PARAMETRES ============ -->
         <section class="content-section" id="section-settings">
-            <div class="card">
-                <h3><i class="fa-solid fa-phone"></i> Mon telephone</h3>
-                <div class="form-group">
-                    <label>Numero de telephone (avec indicatif +33...)</label>
-                    <input type="tel" id="settingAgentPhone" placeholder="+33612345678">
-                </div>
-                <div class="form-group">
-                    <label>Mode d'appel</label>
-                    <select id="settingDialMode" onchange="dialMode=this.value; localStorage.setItem('dialMode',this.value)">
-                        <option value="phone">Telephone (Click-to-Call)</option>
-                        <option value="browser">Navigateur (WebRTC)</option>
-                    </select>
-                </div>
-                <button class="btn btn-primary" onclick="saveAgentPhone()">
-                    <i class="fa-solid fa-save"></i> Enregistrer
-                </button>
-            </div>
             <div class="card">
                 <h3>Configuration Twilio</h3>
                 <div class="form-group">

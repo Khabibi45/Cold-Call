@@ -87,6 +87,7 @@ def _serialize_call(c: Call) -> dict:
 
 @router.get("/")
 async def list_leads(
+    search: str | None = Query(None, description="Recherche texte dans le nom, adresse, ville ou categorie"),
     city: str | None = Query(None, description="Filtrer par ville"),
     category: str | None = Query(None, description="Filtrer par categorie"),
     has_website: bool = Query(False, description="Inclure ceux avec site web"),
@@ -100,6 +101,16 @@ async def list_leads(
 ):
     """Liste les leads avec filtres, pagination et tri avance."""
     query = select(Lead).where(Lead.has_website == has_website)
+
+    # Recherche textuelle multi-champs
+    if search:
+        search_term = f"%{search}%"
+        query = query.where(
+            (Lead.business_name.ilike(search_term)) |
+            (Lead.address.ilike(search_term)) |
+            (Lead.city.ilike(search_term)) |
+            (Lead.category.ilike(search_term))
+        )
 
     if city:
         query = query.where(Lead.city.ilike(f"%{city}%"))
