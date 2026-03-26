@@ -77,41 +77,53 @@ function initNavigation() {
         });
     });
 
+    // --- Sidebar toggle (hamburger) ---
+    const sidebar = document.getElementById('sidebar');
     const toggle = document.getElementById('sidebarToggle');
+
+    // Creer l'overlay une seule fois
+    const overlay = document.createElement('div');
+    overlay.id = 'sidebarOverlay';
+    overlay.className = 'sidebar-overlay';
+    document.body.appendChild(overlay);
+
+    function openSidebar() {
+        sidebar.classList.add('mobile-open');
+        overlay.classList.add('active');
+    }
+    function closeSidebar() {
+        sidebar.classList.remove('mobile-open');
+        overlay.classList.remove('active');
+    }
+
     if (toggle) {
-        toggle.addEventListener('click', () => {
-            const sidebar = document.getElementById('sidebar');
-            sidebar.classList.toggle('mobile-open');
-            // Overlay sombre pour fermer la sidebar en cliquant a cote
-            let overlay = document.getElementById('sidebarOverlay');
-            if (!overlay) {
-                overlay = document.createElement('div');
-                overlay.id = 'sidebarOverlay';
-                overlay.className = 'sidebar-overlay';
-                document.body.appendChild(overlay);
-                overlay.addEventListener('click', () => {
-                    sidebar.classList.remove('mobile-open');
-                    overlay.classList.remove('active');
-                });
+        toggle.addEventListener('click', (e) => {
+            e.stopPropagation();
+            if (sidebar.classList.contains('mobile-open')) {
+                closeSidebar();
+            } else {
+                openSidebar();
             }
-            overlay.classList.toggle('active', sidebar.classList.contains('mobile-open'));
         });
     }
 
-    // Bottom nav mobile — navigation par onglets
+    // Fermer la sidebar en cliquant sur l'overlay
+    overlay.addEventListener('click', closeSidebar);
+
+    // Fermer la sidebar quand on clique sur un item de nav (mobile)
+    document.querySelectorAll('.nav-item').forEach(item => {
+        item.addEventListener('click', closeSidebar);
+    });
+
+    // --- Bottom nav mobile ---
     document.querySelectorAll('.mobile-nav-btn').forEach(btn => {
         btn.addEventListener('click', () => {
             const section = btn.dataset.section;
-            // Declencher le clic sur l'item sidebar correspondant
             const sidebarItem = document.querySelector(`.nav-item[data-section="${section}"]`);
             if (sidebarItem) sidebarItem.click();
-            // Mettre a jour la bottom nav active
             document.querySelectorAll('.mobile-nav-btn').forEach(b => b.classList.remove('active'));
             btn.classList.add('active');
-            // Fermer la sidebar si ouverte
-            document.getElementById('sidebar').classList.remove('mobile-open');
-            const overlay = document.getElementById('sidebarOverlay');
-            if (overlay) overlay.classList.remove('active');
+            closeSidebar();
         });
     });
 }
