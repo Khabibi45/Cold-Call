@@ -1,12 +1,13 @@
 """
 API Stats — Metriques et analytics pour le dashboard.
 Appels/jour, taux de connexion, repartition statuts, heatmap horaire.
+Top villes/categories, leads/appels du jour.
 """
 
 from datetime import datetime, timezone, timedelta
 
 from fastapi import APIRouter, Depends, Query
-from sqlalchemy import select, func, extract, cast, Date
+from sqlalchemy import select, func, extract, cast, Date, and_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
@@ -20,7 +21,11 @@ router = APIRouter()
 
 @router.get("/overview")
 async def stats_overview(db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)):
-    """Stats globales de la plateforme."""
+    """Stats globales de la plateforme, enrichies avec top villes/categories et compteurs du jour."""
+    now = datetime.now(timezone.utc)
+    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+
+    # Compteurs globaux
     total_leads = (await db.execute(select(func.count(Lead.id)))).scalar() or 0
     leads_sans_site = (await db.execute(select(func.count(Lead.id)).where(Lead.has_website == False))).scalar() or 0
     total_calls = (await db.execute(select(func.count(Call.id)))).scalar() or 0
@@ -31,6 +36,36 @@ async def stats_overview(db: AsyncSession = Depends(get_db), current_user: User 
         select(func.count(Call.id)).where(Call.status == "interested")
     )).scalar() or 0
 
+    # Compteurs du jour
+    leads_today = (await db.execute(
+        select(func.count(Lead.id)).where(Lead.scraped_at >= today_start)
+    )).scalar() or 0
+    calls_today = (await db.execute(
+        select(func.count(Call.id)).where(Call.started_at >= today_start)
+    )).scalar() or 0
+
+    # Top 5 villes avec le plus de leads
+    top_cities_result = await db.execute(
+        select(Lead.city, func.count(Lead.id).label("count"))
+        .where(Lead.city.isnot(None))
+        .where(Lead.has_website == False)
+        .group_by(Lead.city)
+        .order_by(func.count(Lead.id).desc())
+        .limit(5)
+    )
+    top_cities = [{"city": row.city, "count": row.count} for row in top_cities_result.all()]
+
+    # Top 5 categories avec le plus de leads
+    top_categories_result = await db.execute(
+        select(Lead.category, func.count(Lead.id).label("count"))
+        .where(Lead.category.isnot(None))
+        .where(Lead.has_website == False)
+        .group_by(Lead.category)
+        .order_by(func.count(Lead.id).desc())
+        .limit(5)
+    )
+    top_categories = [{"category": row.category, "count": row.count} for row in top_categories_result.all()]
+
     return {
         "total_leads": total_leads,
         "leads_sans_site": leads_sans_site,
@@ -38,6 +73,10 @@ async def stats_overview(db: AsyncSession = Depends(get_db), current_user: User 
         "total_meetings": total_meetings,
         "total_interested": total_interested,
         "conversion_rate": round(total_meetings / total_calls * 100, 2) if total_calls > 0 else 0,
+        "leads_today": leads_today,
+        "calls_today": calls_today,
+        "top_cities": top_cities,
+        "top_categories": top_categories,
     }
 
 

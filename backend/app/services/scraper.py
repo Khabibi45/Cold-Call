@@ -2,6 +2,7 @@
 Service scraper — Outscraper + Foursquare API pour Google Maps.
 Scrape, normalise, deduplique et insere les leads.
 Production-ready : connection pooling, retry, rate limiting, checkpoint/resume.
+Memoire persistante via ScrapeJobs pour eviter de gaspiller des credits API.
 """
 
 import asyncio
@@ -19,12 +20,13 @@ from tenacity import (
     stop_after_attempt,
     wait_exponential,
 )
-from sqlalchemy import text
+from sqlalchemy import text, select, and_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
 from app.core.database import async_session
 from app.models.lead import Lead
+from app.models.scrape_job import ScrapeJob, SUGGESTED_SUBCATEGORIES
 from app.services.dedup import DeduplicationService
 
 logger = logging.getLogger(__name__)
@@ -62,7 +64,8 @@ def _is_retryable_httpx_error(exc: BaseException) -> bool:
 
 
 class ScraperService:
-    """Scrape Google Maps via Outscraper + Foursquare, dedup + insert."""
+    """Scrape Google Maps via Outscraper + Foursquare, dedup + insert.
+    Utilise les ScrapeJobs pour la memoire persistante des recherches."""
 
     def __init__(self) -> None:
         self._running = False
@@ -77,6 +80,7 @@ class ScraperService:
         }
         self._current_query: str = ""
         self._current_city: str = ""
+        self._current_job_id: int | None = None
 
         # Fix #1 : Connection pooling httpx — un seul client reutilise
         self._http_client: httpx.AsyncClient = httpx.AsyncClient(
@@ -114,6 +118,172 @@ class ScraperService:
     def is_any_api_configured(self) -> bool:
         """Verifie qu'au moins une API est configuree."""
         return self.is_outscraper_configured or self.is_foursquare_configured
+
+    # ------------------------------------------------------------------
+    # ScrapeJob — Gestion memoire persistante
+    # ------------------------------------------------------------------
+    async def _get_or_create_job(self, query: str, city: str) -> tuple[ScrapeJob, bool]:
+        """Recupere ou cree un ScrapeJob pour la query+city.
+        Retourne (job, is_resume) : is_resume=True si on reprend un job existant.
+        """
+        async with async_session() as session:
+            # Chercher un job existant pour cette query+city
+            result = await session.execute(
+                select(ScrapeJob)
+                .where(and_(
+                    ScrapeJob.query == query.lower().strip(),
+                    ScrapeJob.city == city.strip(),
+                ))
+                .order_by(ScrapeJob.created_at.desc())
+                .limit(1)
+            )
+            existing_job = result.scalar_one_or_none()
+
+            if existing_job:
+                if existing_job.status == "running":
+                    # Job deja en cours — lever une erreur
+                    raise RuntimeError(f"Un scrape est deja en cours pour '{query} {city}'")
+
+                if existing_job.status == "completed":
+                    # Job deja termine — reprendre avec un offset plus grand
+                    existing_job.status = "running"
+                    existing_job.last_offset = existing_job.last_offset + existing_job.total_found
+                    existing_job.updated_at = datetime.now(timezone.utc)
+                    await session.commit()
+                    await session.refresh(existing_job)
+                    logger.info(
+                        "Reprise ScrapeJob #%d : query=%s city=%s offset=%d",
+                        existing_job.id, query, city, existing_job.last_offset,
+                    )
+                    return existing_job, True
+
+                if existing_job.status in ("pending", "failed"):
+                    # Job en attente ou echoue — reprendre depuis le dernier offset
+                    existing_job.status = "running"
+                    existing_job.updated_at = datetime.now(timezone.utc)
+                    await session.commit()
+                    await session.refresh(existing_job)
+                    logger.info(
+                        "Reprise ScrapeJob #%d (ancien statut=%s) : offset=%d",
+                        existing_job.id, existing_job.status, existing_job.last_offset,
+                    )
+                    return existing_job, True
+
+            # Pas de job existant — en creer un nouveau
+            new_job = ScrapeJob(
+                query=query.lower().strip(),
+                city=city.strip(),
+                source="outscraper",
+                status="running",
+            )
+            session.add(new_job)
+            await session.commit()
+            await session.refresh(new_job)
+            logger.info("Nouveau ScrapeJob #%d : query=%s city=%s", new_job.id, query, city)
+            return new_job, False
+
+    async def _update_job(self, job_id: int, **kwargs) -> None:
+        """Met a jour les champs d'un ScrapeJob."""
+        async with async_session() as session:
+            result = await session.execute(
+                select(ScrapeJob).where(ScrapeJob.id == job_id)
+            )
+            job = result.scalar_one_or_none()
+            if job:
+                for key, value in kwargs.items():
+                    setattr(job, key, value)
+                job.updated_at = datetime.now(timezone.utc)
+                await session.commit()
+
+    async def _complete_job(self, job_id: int) -> None:
+        """Marque un ScrapeJob comme termine."""
+        await self._update_job(
+            job_id,
+            status="completed",
+            completed_at=datetime.now(timezone.utc),
+        )
+
+    async def _fail_job(self, job_id: int, error_msg: str = "") -> None:
+        """Marque un ScrapeJob comme echoue."""
+        await self._update_job(job_id, status="failed")
+        logger.error("ScrapeJob #%d echoue : %s", job_id, error_msg)
+
+    # ------------------------------------------------------------------
+    # ScrapeJob — Historique et suggestions
+    # ------------------------------------------------------------------
+    async def get_job_history(self, limit: int = 50) -> list[dict]:
+        """Retourne l'historique des ScrapeJobs avec leurs stats."""
+        async with async_session() as session:
+            result = await session.execute(
+                select(ScrapeJob)
+                .order_by(ScrapeJob.created_at.desc())
+                .limit(limit)
+            )
+            jobs = result.scalars().all()
+            return [
+                {
+                    "id": j.id,
+                    "query": j.query,
+                    "city": j.city,
+                    "source": j.source,
+                    "status": j.status,
+                    "last_offset": j.last_offset,
+                    "total_found": j.total_found,
+                    "total_inserted": j.total_inserted,
+                    "total_duplicates": j.total_duplicates,
+                    "total_errors": j.total_errors,
+                    "created_at": j.created_at.isoformat() if j.created_at else None,
+                    "updated_at": j.updated_at.isoformat() if j.updated_at else None,
+                    "completed_at": j.completed_at.isoformat() if j.completed_at else None,
+                }
+                for j in jobs
+            ]
+
+    async def get_suggestions(self, city: str = "") -> list[dict]:
+        """Retourne les prochaines queries a lancer, basees sur les jobs deja faits.
+        Exclut les queries deja scrapees et propose des sous-categories.
+        """
+        async with async_session() as session:
+            # Recuperer toutes les queries deja faites pour cette ville
+            query_filter = select(ScrapeJob.query).where(ScrapeJob.city == city.strip()) if city else select(ScrapeJob.query)
+            result = await session.execute(query_filter)
+            done_queries = {row[0].lower() for row in result.all()}
+
+        suggestions = []
+
+        # Pour chaque query terminee, proposer ses sous-categories
+        for done_query in done_queries:
+            subcats = SUGGESTED_SUBCATEGORIES.get(done_query, [])
+            for subcat in subcats:
+                if subcat.lower() not in done_queries:
+                    suggestions.append({
+                        "query": subcat,
+                        "city": city or "Toulouse",
+                        "reason": f"Sous-categorie de '{done_query}'",
+                    })
+
+        # Ajouter les categories principales jamais scrapees
+        all_main_categories = list(SUGGESTED_SUBCATEGORIES.keys())
+        for cat in all_main_categories:
+            if cat.lower() not in done_queries:
+                suggestions.append({
+                    "query": cat,
+                    "city": city or "Toulouse",
+                    "reason": "Categorie principale non scrapee",
+                })
+
+        # Dedupliquer par query et limiter a 20
+        seen = set()
+        unique_suggestions = []
+        for s in suggestions:
+            key = s["query"].lower()
+            if key not in seen:
+                seen.add(key)
+                unique_suggestions.append(s)
+            if len(unique_suggestions) >= 20:
+                break
+
+        return unique_suggestions
 
     # ------------------------------------------------------------------
     # Scoring — Fix #7 : criteres complets
@@ -205,6 +375,7 @@ class ScraperService:
 
     # ------------------------------------------------------------------
     # Fix #2 + #3 + #8 : Outscraper API avec retry, rate limiting, validation JSON
+    # Supporte le parametre skip pour la pagination (memoire ScrapeJob)
     # ------------------------------------------------------------------
     @retry(
         stop=stop_after_attempt(3),
@@ -216,8 +387,10 @@ class ScraperService:
             retry_state.outcome.exception() if retry_state.outcome else "inconnu",
         ),
     )
-    async def scrape_outscraper(self, query: str, city: str, limit: int = 100) -> list[dict]:
-        """Appelle l'API Outscraper Google Maps Search."""
+    async def scrape_outscraper(self, query: str, city: str, limit: int = 100, skip: int = 0) -> list[dict]:
+        """Appelle l'API Outscraper Google Maps Search.
+        Parametre skip pour la pagination — evite de rescraper les memes fiches.
+        """
         if not self.is_outscraper_configured:
             raise ValueError("OUTSCRAPER_API_KEY non configuree")
 
@@ -230,6 +403,11 @@ class ScraperService:
             "region": "FR",
             "async": "false",
         }
+        # Pagination : utiliser skip pour ne pas retomber sur les memes resultats
+        if skip > 0:
+            params["skip"] = skip
+            logger.info("Outscraper skip=%d (memoire ScrapeJob)", skip)
+
         headers = {"X-API-KEY": settings.outscraper_api_key}
 
         # Fix #3 : Rate limiting — attendre si necessaire
@@ -578,12 +756,11 @@ class ScraperService:
         await self._maybe_broadcast_stats()
 
     # ------------------------------------------------------------------
-    # Pipeline complet : scrape → dedup → insert (avec recovery)
+    # Pipeline complet : scrape → dedup → insert (avec memoire ScrapeJob)
     # ------------------------------------------------------------------
     async def run_scrape(self, query: str, city: str, limit: int = 100) -> dict:
-        """Lance un scrape complet : API → parse → dedup → insert.
-        Fix #5 : Wrapper avec recovery — si crash, attend 30s et reprend.
-        Fix #10 : Checkpoint/resume via Redis.
+        """Lance un scrape complet : ScrapeJob memoire → API → parse → dedup → insert.
+        Utilise le ScrapeJob pour savoir ou reprendre (skip/offset).
         """
         self._running = True
         self._should_stop = False
@@ -594,14 +771,16 @@ class ScraperService:
         self._last_lead_broadcast = time.monotonic()
         self._last_stats_broadcast = 0.0
 
-        # Fix #10 : Verifier s'il y a un checkpoint a reprendre
-        checkpoint = await self._load_checkpoint()
-        resume_offset = 0
-        if checkpoint and checkpoint.get("query") == query and checkpoint.get("city") == city:
-            resume_offset = checkpoint.get("offset", 0)
-            logger.info("Reprise du scrape a l'offset %d (checkpoint)", resume_offset)
+        # Recuperer ou creer le ScrapeJob (memoire persistante)
+        try:
+            job, is_resume = await self._get_or_create_job(query, city)
+            self._current_job_id = job.id
+            skip_offset = job.last_offset if is_resume else 0
+        except RuntimeError as e:
+            self._running = False
+            raise
 
-        max_retries = 3  # Fix #5 : nombre max de recovery apres crash
+        max_retries = 3
         attempt = 0
 
         while attempt < max_retries and not self._should_stop:
@@ -610,8 +789,13 @@ class ScraperService:
                 # 1. Appel API Outscraper (si configure)
                 all_results = []
                 if self.is_outscraper_configured:
-                    logger.info("Scrape Outscraper : query=%s city=%s limit=%d", query, city, limit)
-                    outscraper_results = await self.scrape_outscraper(query, city, limit)
+                    logger.info(
+                        "Scrape Outscraper : query=%s city=%s limit=%d skip=%d (ScrapeJob #%d)",
+                        query, city, limit, skip_offset, job.id,
+                    )
+                    outscraper_results = await self.scrape_outscraper(
+                        query, city, limit, skip=skip_offset,
+                    )
                     all_results.extend(outscraper_results)
                     logger.info("Outscraper retourne %d resultats", len(outscraper_results))
 
@@ -627,25 +811,34 @@ class ScraperService:
 
                 self._stats["total"] = len(all_results)
 
-                # Fix #10 : Appliquer l'offset du checkpoint
-                if resume_offset > 0 and resume_offset < len(all_results):
-                    logger.info("Skip des %d premiers resultats (checkpoint)", resume_offset)
-                    all_results = all_results[resume_offset:]
-
                 # 2. Traitement des resultats
                 await self._process_results(all_results)
 
-                # Fix #10 : Sauvegarder le checkpoint apres chaque batch
-                await self._save_checkpoint(query, city, "all", 1, len(all_results))
+                # 3. Mettre a jour le ScrapeJob avec les stats
+                new_offset = skip_offset + len(all_results)
+                await self._update_job(
+                    job.id,
+                    last_offset=new_offset,
+                    total_found=(job.total_found or 0) + len(all_results),
+                    total_inserted=(job.total_inserted or 0) + self._stats["inserted"],
+                    total_duplicates=(job.total_duplicates or 0) + self._stats["duplicates"],
+                    total_errors=(job.total_errors or 0) + self._stats["errors"],
+                )
 
-                # Fix #10 : Scrape termine normalement — supprimer le checkpoint
+                # 4. Si Outscraper ne retourne plus de resultats → marquer completed
+                if len(all_results) == 0:
+                    logger.info("Outscraper ne retourne plus de resultats — ScrapeJob #%d termine", job.id)
+                    await self._complete_job(job.id)
+                else:
+                    await self._complete_job(job.id)
+
+                # 5. Checkpoint Redis (compatibilite)
                 await self._clear_checkpoint()
 
                 # Sortir de la boucle de recovery
                 break
 
             except Exception as e:
-                # Fix #5 : Recovery — logger, attendre, reprendre
                 logger.error(
                     "Crash scrape (tentative %d/%d) : %s",
                     attempt, max_retries, e,
@@ -653,14 +846,14 @@ class ScraperService:
                 if attempt < max_retries and not self._should_stop:
                     logger.info("Attente 30s avant reprise...")
                     await asyncio.sleep(30)
-                    # Sauvegarder le checkpoint pour la reprise
-                    current_offset = self._stats["inserted"] + self._stats["duplicates"] + self._stats["errors"]
-                    await self._save_checkpoint(query, city, "all", 1, current_offset)
+                    await self._save_checkpoint(query, city, "all", 1, skip_offset)
                 else:
+                    await self._fail_job(job.id, str(e))
                     logger.error("Scrape abandonne apres %d tentatives", max_retries)
                     raise
 
         self._running = False
+        self._current_job_id = None
         logger.info("Scrape termine : %s", self._stats)
         return self._stats
 
@@ -686,5 +879,6 @@ class ScraperService:
             "running": self._running,
             "query": self._current_query,
             "city": self._current_city,
+            "job_id": self._current_job_id,
             "stats": self._stats.copy(),
         }

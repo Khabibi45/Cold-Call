@@ -1,10 +1,13 @@
 """
 API Leads — CRUD + filtrage des entreprises scrapees.
+Tri avance, stats detaillees, filtres dynamiques.
 """
+
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
-from sqlalchemy import select, func
+from sqlalchemy import select, func, case, and_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
@@ -31,6 +34,18 @@ class LeadCreate(BaseModel):
     country: str = Field("FR", max_length=50, description="Code pays")
     category: str | None = Field(None, max_length=255, description="Categorie d'activite")
     source: str = Field("manual", max_length=50, description="Source du lead")
+
+
+# --- Colonnes de tri autorisees ---
+SORT_COLUMNS = {
+    "score": Lead.lead_score,
+    "rating": Lead.rating,
+    "review_count": Lead.review_count,
+    "scraped_at": Lead.scraped_at,
+    "city": Lead.city,
+    "category": Lead.category,
+    "business_name": Lead.business_name,
+}
 
 
 def _serialize_lead(l: Lead) -> dict:
@@ -76,12 +91,14 @@ async def list_leads(
     category: str | None = Query(None, description="Filtrer par categorie"),
     has_website: bool = Query(False, description="Inclure ceux avec site web"),
     min_score: int = Query(0, description="Score minimum"),
+    sort_by: str = Query("score", description="Colonne de tri : score, rating, review_count, scraped_at, city, category"),
+    sort_order: str = Query("desc", description="Ordre de tri : desc ou asc"),
     page: int = Query(1, ge=1),
     per_page: int = Query(50, ge=1, le=200),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Liste les leads avec filtres, pagination et tri par score."""
+    """Liste les leads avec filtres, pagination et tri avance."""
     query = select(Lead).where(Lead.has_website == has_website)
 
     if city:
@@ -95,8 +112,15 @@ async def list_leads(
     count_query = select(func.count()).select_from(query.subquery())
     total = (await db.execute(count_query)).scalar() or 0
 
-    # Pagination + tri par score desc
-    query = query.order_by(Lead.lead_score.desc()).offset((page - 1) * per_page).limit(per_page)
+    # Tri dynamique
+    sort_column = SORT_COLUMNS.get(sort_by, Lead.lead_score)
+    if sort_order == "asc":
+        query = query.order_by(sort_column.asc().nullslast())
+    else:
+        query = query.order_by(sort_column.desc().nullslast())
+
+    # Pagination
+    query = query.offset((page - 1) * per_page).limit(per_page)
     result = await db.execute(query)
     leads = result.scalars().all()
 
@@ -131,6 +155,7 @@ async def list_cities(db: AsyncSession = Depends(get_db), current_user: User = D
     result = await db.execute(
         select(Lead.city, func.count(Lead.id).label("count"))
         .where(Lead.has_website == False)
+        .where(Lead.city.isnot(None))
         .group_by(Lead.city)
         .order_by(func.count(Lead.id).desc())
     )
@@ -143,10 +168,74 @@ async def list_categories(db: AsyncSession = Depends(get_db), current_user: User
     result = await db.execute(
         select(Lead.category, func.count(Lead.id).label("count"))
         .where(Lead.has_website == False)
+        .where(Lead.category.isnot(None))
         .group_by(Lead.category)
         .order_by(func.count(Lead.id).desc())
     )
     return [{"category": row.category, "count": row.count} for row in result.all()]
+
+
+@router.get("/stats")
+async def leads_stats(db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)):
+    """Stats detaillees des leads : repartition par ville, categorie, score, etc."""
+    # Total leads
+    total = (await db.execute(select(func.count(Lead.id)))).scalar() or 0
+
+    # Par ville (top 10)
+    by_city_result = await db.execute(
+        select(Lead.city, func.count(Lead.id).label("count"))
+        .where(Lead.city.isnot(None))
+        .group_by(Lead.city)
+        .order_by(func.count(Lead.id).desc())
+        .limit(10)
+    )
+    by_city = [{"city": row.city, "count": row.count} for row in by_city_result.all()]
+
+    # Par categorie (top 10)
+    by_category_result = await db.execute(
+        select(Lead.category, func.count(Lead.id).label("count"))
+        .where(Lead.category.isnot(None))
+        .group_by(Lead.category)
+        .order_by(func.count(Lead.id).desc())
+        .limit(10)
+    )
+    by_category = [{"category": row.category, "count": row.count} for row in by_category_result.all()]
+
+    # Par tranche de score
+    by_score_result = await db.execute(
+        select(
+            case(
+                (and_(Lead.lead_score >= 80, Lead.lead_score <= 100), "80-100"),
+                (and_(Lead.lead_score >= 60, Lead.lead_score < 80), "60-79"),
+                (and_(Lead.lead_score >= 40, Lead.lead_score < 60), "40-59"),
+                (and_(Lead.lead_score >= 20, Lead.lead_score < 40), "20-39"),
+                else_="0-19",
+            ).label("range"),
+            func.count(Lead.id).label("count"),
+        )
+        .group_by("range")
+        .order_by("range")
+    )
+    by_score_range = [{"range": row.range, "count": row.count} for row in by_score_result.all()]
+
+    # Score moyen
+    avg_score = (await db.execute(select(func.avg(Lead.lead_score)))).scalar() or 0
+
+    # Avec/sans telephone
+    with_phone = (await db.execute(
+        select(func.count(Lead.id)).where(Lead.phone.isnot(None)).where(Lead.phone != "")
+    )).scalar() or 0
+    without_phone = total - with_phone
+
+    return {
+        "total": total,
+        "by_city": by_city,
+        "by_category": by_category,
+        "by_score_range": by_score_range,
+        "avg_score": round(avg_score, 1),
+        "with_phone": with_phone,
+        "without_phone": without_phone,
+    }
 
 
 @router.get("/{lead_id}")

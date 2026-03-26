@@ -1,8 +1,9 @@
 """
 API Scraper — Lancer, surveiller et arreter un scrape Google Maps.
+Historique des jobs, suggestions de queries, memoire persistante.
 """
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from app.services.scraper import ScraperService
@@ -22,11 +23,14 @@ class ScrapeRequest(BaseModel):
 
 @router.post("/start")
 async def start_scrape(req: ScrapeRequest):
-    """Lance un scrape Outscraper/Foursquare en tache de fond."""
+    """Lance un scrape Outscraper/Foursquare en tache de fond.
+    Utilise la memoire ScrapeJob : si la meme query+city a deja ete faite,
+    reprend avec un offset plus grand pour ne pas gaspiller de credits API.
+    """
     if _scraper.status["running"]:
         raise HTTPException(status_code=409, detail="Un scrape est deja en cours")
 
-    # Fix #11 : Verifier qu'au moins une API est configuree avant de lancer
+    # Verifier qu'au moins une API est configuree avant de lancer
     if not _scraper.is_any_api_configured:
         raise HTTPException(
             status_code=400,
@@ -58,3 +62,22 @@ async def stop_scrape():
 
     _scraper.stop()
     return {"message": "Arret demande", "status": _scraper.status}
+
+
+@router.get("/history")
+async def scrape_history(limit: int = Query(50, ge=1, le=200)):
+    """Retourne l'historique de tous les ScrapeJobs avec leurs stats.
+    Permet de voir les queries deja faites et leur progression.
+    """
+    jobs = await _scraper.get_job_history(limit=limit)
+    return {"total": len(jobs), "data": jobs}
+
+
+@router.get("/suggestions")
+async def scrape_suggestions(city: str = Query("Toulouse", description="Ville pour les suggestions")):
+    """Retourne les prochaines queries a lancer.
+    Basees sur les jobs deja faits : propose des sous-categories
+    et des categories principales non encore scrapees.
+    """
+    suggestions = await _scraper.get_suggestions(city=city)
+    return {"total": len(suggestions), "data": suggestions}

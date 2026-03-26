@@ -1,20 +1,34 @@
 /* ============================================
    Cold Call Platform — Application principale
    Navigation, API calls, Power Dialer, Charts
+   Tout connecte entre les onglets.
    ============================================ */
 
 const API = '/api';
 
 // ============================================
-// NAVIGATION
+// AUTH — Token JWT + login/register/logout
 // ============================================
-document.addEventListener('DOMContentLoaded', () => {
+let accessToken = localStorage.getItem('access_token') || null;
+
+// ============================================
+// NAVIGATION — Chargement dynamique par onglet
+// ============================================
+document.addEventListener('DOMContentLoaded', async () => {
     initNavigation();
-    loadDashboard();
-    loadDispositionButtons();
-    loadFilters();
-    initScraperFeed();
-    loadAgentPhone();
+
+    // Verifier si on a un token valide
+    if (accessToken) {
+        const me = await apiFetch('/auth/me');
+        if (me) {
+            hideAuthOverlay();
+            updateUserInfo(me);
+            initApp();
+            return;
+        }
+    }
+    // Pas de token ou token invalide — afficher le login
+    showAuthOverlay();
 });
 
 function initNavigation() {
@@ -27,10 +41,29 @@ function initNavigation() {
             document.getElementById(`section-${section}`).classList.add('active');
             document.getElementById('pageTitle').textContent = item.querySelector('span').textContent;
 
-            // Charger les donnees specifiques a la section
-            if (section === 'leads') loadLeads();
-            if (section === 'callbacks') loadCallbacksPage();
-            if (section === 'stats') loadStatsPage();
+            // Charger les donnees specifiques a chaque onglet
+            switch (section) {
+                case 'dashboard':
+                    loadDashboard();
+                    break;
+                case 'dialer':
+                    preloadDialerLead();
+                    break;
+                case 'leads':
+                    loadLeads();
+                    loadFilters();
+                    break;
+                case 'callbacks':
+                    loadCallbacksPage();
+                    break;
+                case 'scraper':
+                    loadScraperHistory();
+                    loadScraperSuggestions();
+                    break;
+                case 'stats':
+                    loadStatsPage();
+                    break;
+            }
         });
     });
 
@@ -39,14 +72,28 @@ function initNavigation() {
 }
 
 // ============================================
-// API HELPERS
+// API HELPERS — Avec token JWT automatique
 // ============================================
 async function apiFetch(endpoint, options = {}) {
+    const headers = { 'Content-Type': 'application/json', ...options.headers };
+    // Ajouter le token JWT si disponible
+    if (accessToken) {
+        headers['Authorization'] = `Bearer ${accessToken}`;
+    }
     try {
-        const res = await fetch(`${API}${endpoint}`, {
-            headers: { 'Content-Type': 'application/json', ...options.headers },
-            ...options,
-        });
+        const res = await fetch(`${API}${endpoint}`, { ...options, headers });
+        if (res.status === 401) {
+            // Token expire ou invalide — tenter un refresh
+            const refreshed = await refreshAccessToken();
+            if (refreshed) {
+                headers['Authorization'] = `Bearer ${accessToken}`;
+                const retryRes = await fetch(`${API}${endpoint}`, { ...options, headers });
+                if (retryRes.ok) return await retryRes.json();
+            }
+            // Refresh echoue — deconnecter
+            logout();
+            return null;
+        }
         if (!res.ok) {
             const err = await res.json().catch(() => ({}));
             throw new Error(err.detail || `Erreur ${res.status}`);
@@ -56,6 +103,182 @@ async function apiFetch(endpoint, options = {}) {
         console.error(`[API] ${endpoint}:`, e.message);
         return null;
     }
+}
+
+// ============================================
+// AUTH — Fonctions login, register, refresh, logout
+// ============================================
+
+/**
+ * Tente de renouveler l'access token via le refresh token (cookie httpOnly)
+ */
+async function refreshAccessToken() {
+    try {
+        const res = await fetch(`${API}/auth/refresh`, {
+            method: 'POST',
+            credentials: 'include',
+        });
+        if (res.ok) {
+            const data = await res.json();
+            accessToken = data.access_token;
+            localStorage.setItem('access_token', accessToken);
+            return true;
+        }
+    } catch (e) {
+        console.warn('[Auth] Echec refresh token:', e.message);
+    }
+    return false;
+}
+
+/**
+ * Connexion avec email/mot de passe
+ */
+async function doLogin() {
+    const email = document.getElementById('authEmail').value.trim();
+    const password = document.getElementById('authPassword').value;
+    const errEl = document.getElementById('authError');
+    errEl.style.display = 'none';
+
+    if (!email || !password) {
+        errEl.textContent = 'Remplis tous les champs';
+        errEl.style.display = 'block';
+        return;
+    }
+
+    try {
+        const res = await fetch(`${API}/auth/login`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'include',
+            body: JSON.stringify({ email, password }),
+        });
+        const data = await res.json();
+        if (!res.ok) {
+            errEl.textContent = data.detail || 'Erreur de connexion';
+            errEl.style.display = 'block';
+            return;
+        }
+        accessToken = data.access_token;
+        localStorage.setItem('access_token', accessToken);
+        hideAuthOverlay();
+        if (data.user) updateUserInfo(data.user);
+        initApp();
+    } catch (e) {
+        errEl.textContent = 'Erreur reseau — verifie que le serveur est lance';
+        errEl.style.display = 'block';
+    }
+}
+
+/**
+ * Inscription avec nom, email, mot de passe
+ */
+async function doRegister() {
+    const name = document.getElementById('authRegName').value.trim();
+    const email = document.getElementById('authRegEmail').value.trim();
+    const password = document.getElementById('authRegPassword').value;
+    const errEl = document.getElementById('authError');
+    errEl.style.display = 'none';
+
+    if (!email || !password) {
+        errEl.textContent = 'Remplis au moins l\'email et le mot de passe';
+        errEl.style.display = 'block';
+        return;
+    }
+
+    try {
+        const res = await fetch(`${API}/auth/register`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name: name || undefined, email, password }),
+        });
+        const data = await res.json();
+        if (!res.ok) {
+            errEl.textContent = data.detail || 'Erreur d\'inscription';
+            errEl.style.display = 'block';
+            return;
+        }
+        // Auto-login apres inscription reussie
+        document.getElementById('authEmail').value = email;
+        document.getElementById('authPassword').value = password;
+        showLogin();
+        await doLogin();
+    } catch (e) {
+        errEl.textContent = 'Erreur reseau';
+        errEl.style.display = 'block';
+    }
+}
+
+/**
+ * Bascule vers le formulaire d'inscription
+ */
+function showRegister() {
+    document.getElementById('authLoginForm').style.display = 'none';
+    document.getElementById('authRegisterForm').style.display = 'block';
+    document.getElementById('authError').style.display = 'none';
+    document.getElementById('authRegName').focus();
+}
+
+/**
+ * Bascule vers le formulaire de connexion
+ */
+function showLogin() {
+    document.getElementById('authLoginForm').style.display = 'block';
+    document.getElementById('authRegisterForm').style.display = 'none';
+    document.getElementById('authError').style.display = 'none';
+    document.getElementById('authEmail').focus();
+}
+
+/**
+ * Cache l'overlay de login et affiche l'app
+ */
+function hideAuthOverlay() {
+    const overlay = document.getElementById('authOverlay');
+    if (overlay) overlay.style.display = 'none';
+}
+
+/**
+ * Affiche l'overlay de login
+ */
+function showAuthOverlay() {
+    const overlay = document.getElementById('authOverlay');
+    if (overlay) overlay.style.display = 'flex';
+    // Auto-focus sur le champ email
+    setTimeout(() => {
+        const emailField = document.getElementById('authEmail');
+        if (emailField) emailField.focus();
+    }, 100);
+}
+
+/**
+ * Deconnexion — supprime le token et affiche le login
+ */
+function logout() {
+    accessToken = null;
+    localStorage.removeItem('access_token');
+    fetch(`${API}/auth/logout`, { method: 'POST', credentials: 'include' }).catch(() => {});
+    showAuthOverlay();
+}
+
+/**
+ * Met a jour les infos utilisateur dans la sidebar
+ */
+function updateUserInfo(user) {
+    const el = document.getElementById('userInfo');
+    if (el && user) {
+        el.innerHTML = `<i class="fa-solid fa-circle-user"></i> <span>${user.name || user.email}</span>
+            <button onclick="logout()" title="Deconnexion" style="margin-left:auto;background:none;border:none;color:var(--danger);cursor:pointer;font-size:0.85rem"><i class="fa-solid fa-right-from-bracket"></i></button>`;
+    }
+}
+
+/**
+ * Initialise toute l'application apres login
+ */
+function initApp() {
+    loadDashboard();
+    loadDispositionButtons();
+    loadFilters();
+    initScraperFeed();
+    loadAgentPhone();
 }
 
 // ============================================
@@ -70,6 +293,8 @@ async function loadDashboard() {
         { label: 'RDV pris', value: 0, icon: 'fa-calendar-check', color: 'var(--success)' },
         { label: 'Interesses', value: 0, icon: 'fa-thumbs-up', color: 'var(--warning)' },
         { label: 'Taux conversion', value: '0%', icon: 'fa-chart-line', color: '#a855f7' },
+        { label: 'Leads aujourd\'hui', value: 0, icon: 'fa-plus', color: '#14b8a6' },
+        { label: 'Appels aujourd\'hui', value: 0, icon: 'fa-headset', color: '#f97316' },
     ];
 
     if (!stats) {
@@ -82,7 +307,12 @@ async function loadDashboard() {
             { label: 'RDV pris', value: stats.total_meetings, icon: 'fa-calendar-check', color: 'var(--success)' },
             { label: 'Interesses', value: stats.total_interested, icon: 'fa-thumbs-up', color: 'var(--warning)' },
             { label: 'Taux conversion', value: stats.conversion_rate + '%', icon: 'fa-chart-line', color: '#a855f7' },
+            { label: 'Leads aujourd\'hui', value: stats.leads_today || 0, icon: 'fa-plus', color: '#14b8a6' },
+            { label: 'Appels aujourd\'hui', value: stats.calls_today || 0, icon: 'fa-headset', color: '#f97316' },
         ]);
+
+        // Afficher les top villes et categories si disponibles
+        renderDashboardTopLists(stats);
     }
 
     // Charger charts + listes en parallele
@@ -90,6 +320,38 @@ async function loadDashboard() {
     loadStatusBreakdownChart();
     loadRecentCalls();
     loadUpcomingCallbacks();
+}
+
+/**
+ * Affiche les top villes et categories dans le dashboard
+ */
+function renderDashboardTopLists(stats) {
+    // Top villes dans la carte des appels recents (ajout d'info)
+    const recentCard = document.getElementById('recentCallsCard');
+    if (recentCard && stats.top_cities && stats.top_cities.length) {
+        let topCitiesHtml = '<div style="margin-top:12px;padding-top:12px;border-top:1px solid rgba(255,255,255,0.08)">';
+        topCitiesHtml += '<h4 style="font-size:0.8rem;color:var(--text-muted);margin-bottom:8px"><i class="fa-solid fa-city"></i> Top villes</h4>';
+        stats.top_cities.forEach(c => {
+            topCitiesHtml += `<span class="badge" style="background:rgba(99,102,241,0.12);color:var(--accent);margin:2px">${c.city} (${c.count})</span>`;
+        });
+        topCitiesHtml += '</div>';
+        // Ajouter apres le contenu existant
+        const existingContent = recentCard.querySelector('#recentCallsList');
+        if (existingContent) existingContent.insertAdjacentHTML('afterend', topCitiesHtml);
+    }
+
+    // Top categories dans la carte callbacks
+    const callbackCard = document.getElementById('upcomingCallbacksCard');
+    if (callbackCard && stats.top_categories && stats.top_categories.length) {
+        let topCatHtml = '<div style="margin-top:12px;padding-top:12px;border-top:1px solid rgba(255,255,255,0.08)">';
+        topCatHtml += '<h4 style="font-size:0.8rem;color:var(--text-muted);margin-bottom:8px"><i class="fa-solid fa-tags"></i> Top categories</h4>';
+        stats.top_categories.forEach(c => {
+            topCatHtml += `<span class="badge" style="background:rgba(34,197,94,0.12);color:var(--success);margin:2px">${c.category} (${c.count})</span>`;
+        });
+        topCatHtml += '</div>';
+        const existingContent = callbackCard.querySelector('#upcomingCallbacksList');
+        if (existingContent) existingContent.insertAdjacentHTML('afterend', topCatHtml);
+    }
 }
 
 // ============================================
@@ -316,7 +578,11 @@ async function loadSpecificLead(leadId) {
 // ============================================
 async function loadStatsPage() {
     // Stats cards (reutilise renderStatCards)
-    const stats = await apiFetch('/stats/overview');
+    const [stats, leadsStats] = await Promise.all([
+        apiFetch('/stats/overview'),
+        apiFetch('/leads/stats'),
+    ]);
+
     const container = document.getElementById('fullStats');
     if (container) {
         if (!stats) {
@@ -332,12 +598,82 @@ async function loadStatsPage() {
                 { label: 'Appels passes', value: stats.total_calls, icon: 'fa-phone', color: 'var(--info)' },
                 { label: 'RDV pris', value: stats.total_meetings, icon: 'fa-calendar-check', color: 'var(--success)' },
                 { label: 'Taux conversion', value: stats.conversion_rate + '%', icon: 'fa-chart-line', color: '#a855f7' },
+                { label: 'Score moyen', value: leadsStats ? leadsStats.avg_score : 0, icon: 'fa-trophy', color: '#f59e0b' },
+                { label: 'Avec telephone', value: leadsStats ? leadsStats.with_phone : 0, icon: 'fa-phone-volume', color: '#22c55e' },
             ]);
         }
     }
 
+    // Afficher les repartitions detaillees des leads
+    if (leadsStats) renderLeadsStatsDetails(leadsStats);
+
     // Heatmap
     loadHeatmap();
+}
+
+/**
+ * Affiche les stats detaillees des leads (villes, categories, tranches de score)
+ */
+function renderLeadsStatsDetails(leadsStats) {
+    const container = document.getElementById('heatmapContainer');
+    if (!container) return;
+
+    // Preparer le HTML des details avant la heatmap
+    let detailsHtml = '';
+
+    // Par ville
+    if (leadsStats.by_city && leadsStats.by_city.length) {
+        detailsHtml += '<div style="margin-bottom:20px"><h4 style="color:var(--text-muted);margin-bottom:8px"><i class="fa-solid fa-city"></i> Leads par ville</h4>';
+        leadsStats.by_city.forEach(c => {
+            const pct = leadsStats.total > 0 ? Math.round(c.count / leadsStats.total * 100) : 0;
+            detailsHtml += `
+                <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">
+                    <span style="width:120px;font-size:0.85rem">${c.city}</span>
+                    <div style="flex:1;height:8px;background:rgba(255,255,255,0.05);border-radius:4px;overflow:hidden">
+                        <div style="width:${pct}%;height:100%;background:var(--accent);border-radius:4px"></div>
+                    </div>
+                    <span style="font-size:0.78rem;color:var(--text-muted)">${c.count}</span>
+                </div>`;
+        });
+        detailsHtml += '</div>';
+    }
+
+    // Par categorie
+    if (leadsStats.by_category && leadsStats.by_category.length) {
+        detailsHtml += '<div style="margin-bottom:20px"><h4 style="color:var(--text-muted);margin-bottom:8px"><i class="fa-solid fa-tags"></i> Leads par categorie</h4>';
+        leadsStats.by_category.forEach(c => {
+            const pct = leadsStats.total > 0 ? Math.round(c.count / leadsStats.total * 100) : 0;
+            detailsHtml += `
+                <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">
+                    <span style="width:120px;font-size:0.85rem">${c.category}</span>
+                    <div style="flex:1;height:8px;background:rgba(255,255,255,0.05);border-radius:4px;overflow:hidden">
+                        <div style="width:${pct}%;height:100%;background:var(--success);border-radius:4px"></div>
+                    </div>
+                    <span style="font-size:0.78rem;color:var(--text-muted)">${c.count}</span>
+                </div>`;
+        });
+        detailsHtml += '</div>';
+    }
+
+    // Par tranche de score
+    if (leadsStats.by_score_range && leadsStats.by_score_range.length) {
+        detailsHtml += '<div style="margin-bottom:20px"><h4 style="color:var(--text-muted);margin-bottom:8px"><i class="fa-solid fa-trophy"></i> Leads par score</h4>';
+        leadsStats.by_score_range.forEach(s => {
+            const pct = leadsStats.total > 0 ? Math.round(s.count / leadsStats.total * 100) : 0;
+            detailsHtml += `
+                <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">
+                    <span style="width:120px;font-size:0.85rem">${s.range}</span>
+                    <div style="flex:1;height:8px;background:rgba(255,255,255,0.05);border-radius:4px;overflow:hidden">
+                        <div style="width:${pct}%;height:100%;background:#f59e0b;border-radius:4px"></div>
+                    </div>
+                    <span style="font-size:0.78rem;color:var(--text-muted)">${s.count}</span>
+                </div>`;
+        });
+        detailsHtml += '</div>';
+    }
+
+    // Inserer avant la heatmap
+    container.insertAdjacentHTML('beforebegin', `<div id="leadsStatsDetails" class="card" style="margin-bottom:16px">${detailsHtml}</div>`);
 }
 
 async function loadHeatmap() {
@@ -433,6 +769,21 @@ let twilioRetryCount = 0;      // compteur retry pour connexion echouee
 let dialMode = localStorage.getItem('dialMode') || 'phone'; // 'phone' (Click-to-Call) ou 'browser' (WebRTC)
 let currentCallSid = null;     // SID de l'appel Click-to-Call en cours
 let currentConference = null;  // Nom de la conference Click-to-Call en cours
+
+// ============================================
+// DIALER — Pre-chargement au switch d'onglet
+// ============================================
+async function preloadDialerLead() {
+    // Pre-charger le prochain lead quand on arrive sur l'onglet dialer
+    const data = await apiFetch('/dialer/next');
+    if (data && data.id) {
+        currentLead = data;
+        displayCurrentLead(data);
+        updateCallStatus('PRET — Lead charge');
+    } else {
+        updateCallStatus('AUCUN LEAD DISPONIBLE');
+    }
+}
 
 // ============================================
 // TWILIO — Initialisation du Device
@@ -879,14 +1230,23 @@ async function submitDisposition() {
 }
 
 // ============================================
-// LEADS TABLE
+// LEADS TABLE — Avec tri avance
 // ============================================
+let currentSortBy = 'score';
+let currentSortOrder = 'desc';
+
 async function loadLeads(page = 1) {
     const city = document.getElementById('filterCity')?.value || '';
     const category = document.getElementById('filterCategory')?.value || '';
     const minScore = document.getElementById('filterMinScore')?.value || 0;
 
-    const params = new URLSearchParams({ page, per_page: 50, has_website: false });
+    const params = new URLSearchParams({
+        page,
+        per_page: 50,
+        has_website: false,
+        sort_by: currentSortBy,
+        sort_order: currentSortOrder,
+    });
     if (city) params.set('city', city);
     if (category) params.set('category', category);
     if (minScore > 0) params.set('min_score', minScore);
@@ -897,17 +1257,24 @@ async function loadLeads(page = 1) {
     const counter = document.getElementById('leadsCounter');
     if (counter) counter.textContent = data.total;
 
+    // Fleche de tri
+    const sortArrow = (col) => {
+        if (col === currentSortBy) return currentSortOrder === 'desc' ? ' ↓' : ' ↑';
+        return '';
+    };
+
     document.getElementById('leadsTable').innerHTML = `
         <table>
             <thead>
                 <tr>
-                    <th>Entreprise</th>
+                    <th onclick="sortLeads('business_name')" style="cursor:pointer">Entreprise${sortArrow('business_name')}</th>
                     <th>Telephone</th>
-                    <th>Ville</th>
-                    <th>Categorie</th>
-                    <th>Note</th>
-                    <th>Avis</th>
-                    <th>Score</th>
+                    <th onclick="sortLeads('city')" style="cursor:pointer">Ville${sortArrow('city')}</th>
+                    <th onclick="sortLeads('category')" style="cursor:pointer">Categorie${sortArrow('category')}</th>
+                    <th onclick="sortLeads('rating')" style="cursor:pointer">Note${sortArrow('rating')}</th>
+                    <th onclick="sortLeads('review_count')" style="cursor:pointer">Avis${sortArrow('review_count')}</th>
+                    <th onclick="sortLeads('score')" style="cursor:pointer">Score${sortArrow('score')}</th>
+                    <th onclick="sortLeads('scraped_at')" style="cursor:pointer">Date${sortArrow('scraped_at')}</th>
                     <th>Maps</th>
                 </tr>
             </thead>
@@ -921,6 +1288,7 @@ async function loadLeads(page = 1) {
                         <td>${l.rating ? l.rating + '/5' : '—'}</td>
                         <td>${l.review_count || 0}</td>
                         <td><strong>${l.lead_score}</strong></td>
+                        <td style="font-size:0.78rem;color:var(--text-muted)">${l.scraped_at ? formatDate(l.scraped_at) : '—'}</td>
                         <td>${l.maps_url ? `<a href="${l.maps_url}" target="_blank" class="btn btn-sm btn-outline"><i class="fa-solid fa-map"></i></a>` : '—'}</td>
                     </tr>
                 `).join('')}
@@ -930,6 +1298,20 @@ async function loadLeads(page = 1) {
 
     // Pagination
     renderPagination(data.page, data.pages, data.total);
+}
+
+/**
+ * Change le tri et recharge les leads
+ */
+function sortLeads(column) {
+    if (currentSortBy === column) {
+        // Toggle l'ordre
+        currentSortOrder = currentSortOrder === 'desc' ? 'asc' : 'desc';
+    } else {
+        currentSortBy = column;
+        currentSortOrder = 'desc';
+    }
+    loadLeads(1);
 }
 
 function renderPagination(currentPage, totalPages, total) {
@@ -972,27 +1354,38 @@ async function loadFilters() {
     ]);
 
     const citySelect = document.getElementById('filterCity');
-    if (citySelect && cities && cities.length) {
-        cities.forEach(c => {
-            if (c.city) {
-                const opt = document.createElement('option');
-                opt.value = c.city;
-                opt.textContent = `${c.city} (${c.count})`;
-                citySelect.appendChild(opt);
-            }
-        });
+    if (citySelect) {
+        const currentVal = citySelect.value;
+        // Garder la premiere option "Toutes les villes" et remplacer le reste
+        citySelect.innerHTML = '<option value="">Toutes les villes</option>';
+        if (cities && cities.length) {
+            cities.forEach(c => {
+                if (c.city) {
+                    const opt = document.createElement('option');
+                    opt.value = c.city;
+                    opt.textContent = `${c.city} (${c.count})`;
+                    citySelect.appendChild(opt);
+                }
+            });
+        }
+        citySelect.value = currentVal;
     }
 
     const catSelect = document.getElementById('filterCategory');
-    if (catSelect && categories && categories.length) {
-        categories.forEach(c => {
-            if (c.category) {
-                const opt = document.createElement('option');
-                opt.value = c.category;
-                opt.textContent = `${c.category} (${c.count})`;
-                catSelect.appendChild(opt);
-            }
-        });
+    if (catSelect) {
+        const currentVal = catSelect.value;
+        catSelect.innerHTML = '<option value="">Toutes les categories</option>';
+        if (categories && categories.length) {
+            categories.forEach(c => {
+                if (c.category) {
+                    const opt = document.createElement('option');
+                    opt.value = c.category;
+                    opt.textContent = `${c.category} (${c.count})`;
+                    catSelect.appendChild(opt);
+                }
+            });
+        }
+        catSelect.value = currentVal;
     }
 }
 
@@ -1129,6 +1522,20 @@ function connectScraperWebSocket() {
                 updateScraperStats('En cours...');
             }
 
+            // Support du batch de leads
+            if (msg.type === 'new_leads_batch' && msg.data) {
+                msg.data.forEach(lead => {
+                    scraperLeadsFound++;
+                    addScraperFeedItem(
+                        lead.business_name || 'Inconnu',
+                        lead.city || '',
+                        lead.phone || '',
+                        false
+                    );
+                });
+                updateScraperStats('En cours...');
+            }
+
             if (msg.type === 'stats' && msg.data) {
                 // Mise a jour des stats depuis le backend
                 scraperLeadsFound = msg.data.inserted || 0;
@@ -1210,6 +1617,9 @@ async function stopScraper() {
     document.getElementById('scraperStatus').className = 'scraper-status offline';
     document.getElementById('scraperStatus').innerHTML = '<i class="fa-solid fa-circle"></i> Scraper arrete';
     updateScraperStats('Arrete');
+
+    // Rafraichir l'historique des jobs
+    loadScraperHistory();
 }
 
 function updateScraperStats(statusText) {
@@ -1259,9 +1669,110 @@ function addScraperFeedItem(name, city, phone, isDuplicate) {
 }
 
 // ============================================
-// SCRAPER CONTROLS
+// SCRAPER — Historique des ScrapeJobs
 // ============================================
-// startScraper et stopScraper sont definis dans la section SCRAPER FEED ci-dessus
+async function loadScraperHistory() {
+    const container = document.getElementById('scraperHistory');
+    if (!container) return;
+
+    const data = await apiFetch('/scraper/history?limit=20');
+    if (!data || !data.data || !data.data.length) {
+        container.innerHTML = '<p style="color:var(--text-muted);text-align:center;padding:20px">Aucun scrape effectue</p>';
+        return;
+    }
+
+    const statusColors = {
+        completed: 'var(--success)',
+        running: 'var(--info)',
+        failed: 'var(--danger)',
+        pending: 'var(--text-muted)',
+    };
+    const statusLabels = {
+        completed: 'Termine',
+        running: 'En cours',
+        failed: 'Echoue',
+        pending: 'En attente',
+    };
+
+    container.innerHTML = `
+        <table>
+            <thead>
+                <tr>
+                    <th>Query</th>
+                    <th>Ville</th>
+                    <th>Statut</th>
+                    <th>Trouves</th>
+                    <th>Inseres</th>
+                    <th>Doublons</th>
+                    <th>Offset</th>
+                    <th>Date</th>
+                    <th>Action</th>
+                </tr>
+            </thead>
+            <tbody>
+                ${data.data.map(j => `
+                    <tr>
+                        <td style="font-weight:600">${j.query}</td>
+                        <td>${j.city}</td>
+                        <td>
+                            <span class="badge" style="background:${statusColors[j.status] || '#6b7280'}22;color:${statusColors[j.status] || '#6b7280'}">
+                                ${statusLabels[j.status] || j.status}
+                            </span>
+                        </td>
+                        <td>${j.total_found || 0}</td>
+                        <td style="color:var(--success)">${j.total_inserted || 0}</td>
+                        <td style="color:var(--warning)">${j.total_duplicates || 0}</td>
+                        <td style="color:var(--text-muted)">${j.last_offset || 0}</td>
+                        <td style="font-size:0.78rem;color:var(--text-muted)">${j.created_at ? formatDate(j.created_at) : '—'}</td>
+                        <td>
+                            <button class="btn btn-sm btn-outline" onclick="rerunScrapeJob('${j.query}', '${j.city}')">
+                                <i class="fa-solid fa-rotate-right"></i>
+                            </button>
+                        </td>
+                    </tr>
+                `).join('')}
+            </tbody>
+        </table>
+    `;
+}
+
+/**
+ * Relancer un scrape depuis l'historique (reprend avec l'offset memoire)
+ */
+function rerunScrapeJob(query, city) {
+    document.getElementById('scraperCategory').value = query;
+    document.getElementById('scraperCity').value = city;
+    startScraper();
+}
+
+// ============================================
+// SCRAPER — Suggestions de queries
+// ============================================
+async function loadScraperSuggestions() {
+    const container = document.getElementById('scraperSuggestions');
+    if (!container) return;
+
+    const city = document.getElementById('scraperCity')?.value || 'Toulouse';
+    const data = await apiFetch(`/scraper/suggestions?city=${encodeURIComponent(city)}`);
+    if (!data || !data.data || !data.data.length) {
+        container.innerHTML = '<p style="color:var(--text-muted);font-size:0.85rem">Aucune suggestion disponible</p>';
+        return;
+    }
+
+    container.innerHTML = data.data.slice(0, 10).map(s => `
+        <button class="btn btn-sm btn-outline" style="margin:3px" onclick="applySuggestion('${s.query}', '${s.city}')">
+            ${s.query} <span style="font-size:0.7rem;color:var(--text-muted)">${s.city}</span>
+        </button>
+    `).join('');
+}
+
+/**
+ * Applique une suggestion dans les champs du scraper
+ */
+function applySuggestion(query, city) {
+    document.getElementById('scraperCategory').value = query;
+    document.getElementById('scraperCity').value = city;
+}
 
 // ============================================
 // SETTINGS

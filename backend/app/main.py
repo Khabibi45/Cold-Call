@@ -31,6 +31,7 @@ from app.api.oauth import router as oauth_router
 from app.api.websocket import router as ws_router
 from app.core.rate_limiter import limiter
 from app.services.dedup import DeduplicationService
+from app.models.scrape_job import ScrapeJob  # noqa: F401 — force la creation de la table au demarrage
 
 settings = get_settings()
 

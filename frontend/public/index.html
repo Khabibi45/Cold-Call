@@ -11,6 +11,57 @@
     <link rel="stylesheet" href="/css/style.css">
 </head>
 <body>
+    <!-- ============ ECRAN LOGIN / INSCRIPTION ============ -->
+    <div id="authOverlay" class="auth-overlay">
+        <div class="auth-card">
+            <h2><i class="fa-solid fa-phone-volume"></i> ColdCall</h2>
+            <p>Connecte-toi pour acceder a la plateforme</p>
+
+            <!-- Formulaire de connexion -->
+            <div id="authLoginForm">
+                <div class="form-group">
+                    <label>Email</label>
+                    <input type="email" id="authEmail" placeholder="ton@email.fr" onkeydown="if(event.key==='Enter')doLogin()">
+                </div>
+                <div class="form-group">
+                    <label>Mot de passe</label>
+                    <input type="password" id="authPassword" placeholder="********" onkeydown="if(event.key==='Enter')doLogin()">
+                </div>
+                <button class="btn btn-primary" style="width:100%" onclick="doLogin()">
+                    <i class="fa-solid fa-right-to-bracket"></i> Connexion
+                </button>
+                <p style="margin-top:12px;text-align:center;font-size:0.85rem;color:var(--text-muted)">
+                    Pas encore de compte ? <a href="#" onclick="showRegister()" style="color:var(--accent)">Inscription</a>
+                </p>
+            </div>
+
+            <!-- Formulaire d'inscription -->
+            <div id="authRegisterForm" style="display:none">
+                <div class="form-group">
+                    <label>Nom</label>
+                    <input type="text" id="authRegName" placeholder="Ton nom" onkeydown="if(event.key==='Enter')document.getElementById('authRegEmail').focus()">
+                </div>
+                <div class="form-group">
+                    <label>Email</label>
+                    <input type="email" id="authRegEmail" placeholder="ton@email.fr" onkeydown="if(event.key==='Enter')document.getElementById('authRegPassword').focus()">
+                </div>
+                <div class="form-group">
+                    <label>Mot de passe</label>
+                    <input type="password" id="authRegPassword" placeholder="********" onkeydown="if(event.key==='Enter')doRegister()">
+                </div>
+                <button class="btn btn-primary" style="width:100%" onclick="doRegister()">
+                    <i class="fa-solid fa-user-plus"></i> Inscription
+                </button>
+                <p style="margin-top:12px;text-align:center;font-size:0.85rem;color:var(--text-muted)">
+                    Deja un compte ? <a href="#" onclick="showLogin()" style="color:var(--accent)">Connexion</a>
+                </p>
+            </div>
+
+            <!-- Zone d'erreur -->
+            <div id="authError" style="display:none;margin-top:12px;padding:8px 12px;background:rgba(239,68,68,0.15);color:var(--danger);border-radius:8px;font-size:0.85rem"></div>
+        </div>
+    </div>
+
     <!-- ============ SIDEBAR ============ -->
     <aside id="sidebar" class="sidebar">
         <div class="sidebar-header">
@@ -212,7 +263,7 @@
                 <div class="form-row">
                     <div class="form-group">
                         <label>Ville cible</label>
-                        <input type="text" id="scraperCity" value="Toulouse" placeholder="ex: Toulouse, Albi...">
+                        <input type="text" id="scraperCity" value="Toulouse" placeholder="ex: Toulouse, Albi..." onchange="loadScraperSuggestions()">
                     </div>
                     <div class="form-group">
                         <label>Categorie</label>
@@ -225,11 +276,21 @@
                         <i class="fa-solid fa-stop"></i> Arreter
                     </button>
                 </div>
+                <!-- Suggestions de queries basees sur l'historique -->
+                <div style="margin-top:12px">
+                    <h4 style="font-size:0.85rem;color:var(--text-muted);margin-bottom:6px"><i class="fa-solid fa-lightbulb"></i> Suggestions</h4>
+                    <div id="scraperSuggestions"></div>
+                </div>
             </div>
             <div class="stats-grid" id="scraperStats"></div>
             <div class="card">
                 <h3>Resultats en temps reel</h3>
                 <div id="scraperFeed" class="scraper-feed"></div>
+            </div>
+            <!-- Historique des ScrapeJobs -->
+            <div class="card" style="margin-top:16px">
+                <h3><i class="fa-solid fa-clock-rotate-left"></i> Historique des scrapes</h3>
+                <div id="scraperHistory"></div>
             </div>
         </section>
 

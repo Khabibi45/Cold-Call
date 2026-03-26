@@ -10,6 +10,7 @@ from pydantic import BaseModel, EmailStr
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import get_settings
 from app.core.database import get_db
 from app.core.deps import get_current_user
 from app.core.security import (
@@ -22,6 +23,10 @@ from app.core.security import (
 from app.models.user import User
 
 router = APIRouter()
+_settings = get_settings()
+
+# En dev (HTTP), secure=False pour que le cookie soit envoye sur localhost
+_cookie_secure = not _settings.app_debug
 
 
 class RegisterRequest(BaseModel):
@@ -75,7 +80,7 @@ async def login(data: LoginRequest, response: Response, db: AsyncSession = Depen
         key="refresh_token",
         value=refresh_token,
         httponly=True,
-        secure=True,
+        secure=_cookie_secure,
         samesite="lax",
         max_age=60 * 60 * 24 * 30,  # 30 jours
     )
@@ -136,7 +141,7 @@ async def refresh(
         key="refresh_token",
         value=new_refresh_token,
         httponly=True,
-        secure=True,
+        secure=_cookie_secure,
         samesite="lax",
         max_age=60 * 60 * 24 * 30,
     )
@@ -185,7 +190,7 @@ async def logout(response: Response):
     response.delete_cookie(
         key="refresh_token",
         httponly=True,
-        secure=True,
+        secure=_cookie_secure,
         samesite="lax",
     )
     return {"message": "Deconnecte avec succes"}
