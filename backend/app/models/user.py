@@ -24,6 +24,9 @@ class User(Base):
     # --- Auth locale ---
     password_hash = Column(String(255), nullable=True)
 
+    # --- Telephone agent (Click-to-Call) ---
+    phone_number = Column(String(50), nullable=True)
+
     # --- OAuth2 ---
     oauth_provider = Column(String(50), nullable=True)
     oauth_id = Column(String(255), nullable=True)

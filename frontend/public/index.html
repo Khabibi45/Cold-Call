@@ -247,6 +247,23 @@
         <!-- ============ SECTION: PARAMETRES ============ -->
         <section class="content-section" id="section-settings">
             <div class="card">
+                <h3><i class="fa-solid fa-phone"></i> Mon telephone</h3>
+                <div class="form-group">
+                    <label>Numero de telephone (avec indicatif +33...)</label>
+                    <input type="tel" id="settingAgentPhone" placeholder="+33612345678">
+                </div>
+                <div class="form-group">
+                    <label>Mode d'appel</label>
+                    <select id="settingDialMode" onchange="dialMode=this.value; localStorage.setItem('dialMode',this.value)">
+                        <option value="phone">Telephone (Click-to-Call)</option>
+                        <option value="browser">Navigateur (WebRTC)</option>
+                    </select>
+                </div>
+                <button class="btn btn-primary" onclick="saveAgentPhone()">
+                    <i class="fa-solid fa-save"></i> Enregistrer
+                </button>
+            </div>
+            <div class="card">
                 <h3>Configuration Twilio</h3>
                 <div class="form-group">
                     <label>Account SID</label>

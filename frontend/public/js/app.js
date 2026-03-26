@@ -14,6 +14,7 @@ document.addEventListener('DOMContentLoaded', () => {
     loadDispositionButtons();
     loadFilters();
     initScraperFeed();
+    loadAgentPhone();
 });
 
 function initNavigation() {
@@ -427,6 +428,13 @@ let simulationMode = true;     // fallback si Twilio non configure
 let twilioRetryCount = 0;      // compteur retry pour connexion echouee
 
 // ============================================
+// CLICK-TO-CALL — Variables globales
+// ============================================
+let dialMode = localStorage.getItem('dialMode') || 'phone'; // 'phone' (Click-to-Call) ou 'browser' (WebRTC)
+let currentCallSid = null;     // SID de l'appel Click-to-Call en cours
+let currentConference = null;  // Nom de la conference Click-to-Call en cours
+
+// ============================================
 // TWILIO — Initialisation du Device
 // ============================================
 async function initTwilioDevice() {
@@ -552,14 +560,38 @@ async function makeRealCall() {
     }
 
     // Mode simulation : on simule juste le timer
-    if (simulationMode) {
+    if (simulationMode && dialMode === 'browser') {
         console.log('[Simulation] Appel simule vers', currentLead.phone);
         startCallTimer();
         updateCallStatus('APPEL EN COURS (simulation)');
         return;
     }
 
-    // Mode reel : utiliser device.connect() pour appeler directement
+    // ---- Mode Click-to-Call (telephone) ----
+    if (dialMode === 'phone') {
+        try {
+            updateCallStatus('APPEL VERS VOTRE TELEPHONE...');
+            const res = await apiFetch('/twilio/click-to-call', {
+                method: 'POST',
+                body: JSON.stringify({ lead_id: currentLead.id }),
+            });
+            if (res) {
+                currentCallSid = res.agent_call_sid;
+                currentConference = res.conference;
+                startCallTimer();
+                updateCallStatus('VOTRE TELEPHONE SONNE...');
+                console.log('[Click-to-Call] Appel lance', res);
+            } else {
+                updateCallStatus('ECHEC CLICK-TO-CALL');
+            }
+        } catch (e) {
+            console.error('[Click-to-Call] Erreur:', e.message);
+            updateCallStatus('ECHEC CLICK-TO-CALL');
+        }
+        return;
+    }
+
+    // ---- Mode WebRTC (navigateur) ----
     try {
         updateCallStatus('CONNEXION...');
         twilioRetryCount = 0;
@@ -649,11 +681,18 @@ async function startDialerSession() {
     document.getElementById('btnHangup').style.display = '';
     document.getElementById('btnSkip').style.display = '';
     document.getElementById('btnPause').style.display = '';
-    updateCallStatus('INITIALISATION TWILIO...');
 
-    // Initialiser le SDK Twilio (si pas deja fait)
-    if (!twilioDevice) {
-        await initTwilioDevice();
+    if (dialMode === 'phone') {
+        // Mode Click-to-Call : pas besoin du SDK Twilio dans le navigateur
+        updateCallStatus('MODE TELEPHONE — PRET');
+        simulationMode = false;
+        hideSimulationBanner();
+    } else {
+        // Mode WebRTC : initialiser le SDK Twilio
+        updateCallStatus('INITIALISATION TWILIO...');
+        if (!twilioDevice) {
+            await initTwilioDevice();
+        }
     }
 
     updateCallStatus('CHARGEMENT...');
@@ -728,7 +767,19 @@ function hangupCall() {
     const duration = stopCallTimer();
     showMicIndicator(false);
 
-    // Raccrocher l'appel reel si une connexion existe
+    // Mode Click-to-Call : raccrocher via l'API backend
+    if (dialMode === 'phone' && currentCallSid) {
+        apiFetch('/twilio/hangup', {
+            method: 'POST',
+            body: JSON.stringify({ call_sid: currentCallSid }),
+        }).catch((e) => console.warn('[Click-to-Call] Erreur raccrochage:', e));
+        currentCallSid = null;
+        currentConference = null;
+        updateCallStatus('RACCROCHE — Choisir un statut');
+        return;
+    }
+
+    // Mode WebRTC : raccrocher l'appel reel si une connexion existe
     if (currentConnection) {
         try {
             currentConnection.disconnect();
@@ -749,7 +800,14 @@ function skipLead() {
     showMicIndicator(false);
 
     // Raccrocher l'appel en cours avant de passer au suivant
-    if (currentConnection) {
+    if (dialMode === 'phone' && currentCallSid) {
+        apiFetch('/twilio/hangup', {
+            method: 'POST',
+            body: JSON.stringify({ call_sid: currentCallSid }),
+        }).catch(() => {});
+        currentCallSid = null;
+        currentConference = null;
+    } else if (currentConnection) {
         try { currentConnection.disconnect(); } catch (e) {}
         currentConnection = null;
     }
@@ -762,7 +820,14 @@ function pauseSession() {
     showMicIndicator(false);
 
     // Raccrocher l'appel en cours si actif
-    if (currentConnection) {
+    if (dialMode === 'phone' && currentCallSid) {
+        apiFetch('/twilio/hangup', {
+            method: 'POST',
+            body: JSON.stringify({ call_sid: currentCallSid }),
+        }).catch(() => {});
+        currentCallSid = null;
+        currentConference = null;
+    } else if (currentConnection) {
         try { currentConnection.disconnect(); } catch (e) {}
         currentConnection = null;
     }
@@ -796,7 +861,14 @@ async function submitDisposition() {
 
     // Nettoyer la connexion en cours
     showMicIndicator(false);
-    if (currentConnection) {
+    if (dialMode === 'phone' && currentCallSid) {
+        apiFetch('/twilio/hangup', {
+            method: 'POST',
+            body: JSON.stringify({ call_sid: currentCallSid }),
+        }).catch(() => {});
+        currentCallSid = null;
+        currentConference = null;
+    } else if (currentConnection) {
         try { currentConnection.disconnect(); } catch (e) {}
         currentConnection = null;
     }
@@ -1204,6 +1276,39 @@ function saveSettings() {
     };
     localStorage.setItem('coldcall_settings', JSON.stringify(settings));
     alert('Parametres enregistres');
+}
+
+// ============================================
+// CLICK-TO-CALL — Sauvegarde numero agent
+// ============================================
+async function saveAgentPhone() {
+    const phone = document.getElementById('settingAgentPhone')?.value;
+    if (!phone) {
+        alert('Entrez un numero de telephone');
+        return;
+    }
+    const res = await apiFetch('/auth/me/phone', {
+        method: 'PATCH',
+        body: JSON.stringify({ phone_number: phone }),
+    });
+    if (res) {
+        alert('Numero de telephone enregistre');
+    }
+}
+
+async function loadAgentPhone() {
+    const me = await apiFetch('/auth/me');
+    if (me && me.phone_number) {
+        const el = document.getElementById('settingAgentPhone');
+        if (el) el.value = me.phone_number;
+    }
+    // Restaurer le mode d'appel depuis le localStorage
+    const savedMode = localStorage.getItem('dialMode');
+    if (savedMode) {
+        dialMode = savedMode;
+        const selectEl = document.getElementById('settingDialMode');
+        if (selectEl) selectEl.value = savedMode;
+    }
 }
 
 // ============================================

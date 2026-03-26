@@ -4,12 +4,14 @@ ATTENTION : Les webhooks (/voice, /voice/outbound, /status-callback) sont appele
 directement par Twilio et ne doivent PAS avoir de protection JWT.
 """
 
+import time
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from twilio.twiml.voice_response import VoiceResponse, Dial
 
 from app.core.config import get_settings
 from app.core.database import get_db
@@ -181,6 +183,71 @@ async def hangup(
     return {"message": "Appel raccroche", "call_sid": data.call_sid}
 
 
+@router.post("/click-to-call")
+async def click_to_call(
+    data: MakeCallRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Lance un appel Click-to-Call : appelle d'abord le telephone de l'agent,
+    puis bridge avec le prospect dans une conference.
+    """
+    service = _check_twilio_configured()
+
+    if not current_user.phone_number:
+        raise HTTPException(400, "Configurez votre numero de telephone dans les parametres")
+
+    # Charger le lead depuis la DB
+    lead = await db.get(Lead, data.lead_id)
+    if not lead:
+        raise HTTPException(status_code=404, detail="Lead introuvable")
+
+    phone = lead.phone_e164 or lead.phone
+    if not phone:
+        raise HTTPException(status_code=400, detail="Ce lead n'a pas de numero de telephone")
+
+    # Nom de conference unique
+    conference_name = f"c2c_{current_user.id}_{lead.id}_{int(time.time())}"
+
+    # Lancer le click-to-call
+    try:
+        agent_call_sid = service.click_to_call(
+            agent_phone=current_user.phone_number,
+            prospect_phone=phone,
+            conference_name=conference_name,
+        )
+    except Exception as e:
+        logger.error("erreur_click_to_call", error=str(e), lead_id=data.lead_id)
+        raise HTTPException(status_code=502, detail=f"Erreur Twilio : {str(e)}")
+
+    # Creer l'enregistrement Call en DB
+    call = Call(
+        lead_id=lead.id,
+        user_id=current_user.id,
+        status="no_answer",
+        twilio_call_sid=agent_call_sid,
+        started_at=datetime.now(timezone.utc),
+    )
+    db.add(call)
+    await db.flush()
+
+    logger.info(
+        "click_to_call_lance",
+        call_id=call.id,
+        agent_call_sid=agent_call_sid,
+        lead_id=lead.id,
+        user_id=current_user.id,
+        conference=conference_name,
+    )
+
+    return {
+        "call_id": call.id,
+        "agent_call_sid": agent_call_sid,
+        "conference": conference_name,
+    }
+
+
 # ======================================================================
 # WEBHOOKS APPELES PAR TWILIO (PAS de protection JWT)
 # ======================================================================
@@ -225,6 +292,77 @@ async def outbound_webhook(request: Request):
 
     twiml = service.twiml_join_conference(conference_name)
     return Response(content=twiml, media_type="application/xml")
+
+
+@router.post("/voice/click2call-agent", include_in_schema=False)
+async def click2call_agent_webhook(request: Request):
+    """
+    Webhook appele quand l'AGENT decroche son telephone.
+    1. Place l'agent dans la conference
+    2. Lance l'appel vers le prospect dans la meme conference
+    """
+    params = await _validate_twilio_signature(request)
+    settings = get_settings()
+
+    conference = request.query_params.get("conference", "default")
+    prospect = request.query_params.get("prospect", "")
+
+    logger.info("click2call_agent_decroche", conference=conference, prospect=prospect)
+
+    # Placer l'agent dans la conference
+    response = VoiceResponse()
+    dial = Dial()
+    dial.conference(
+        conference,
+        start_conference_on_enter=True,
+        end_conference_on_exit=True,
+        beep=False,
+    )
+    response.append(dial)
+
+    # Appeler le prospect en parallele dans la meme conference
+    if prospect:
+        service = get_twilio_service()
+        callback_base = settings.app_url.rstrip("/")
+        try:
+            service.client.calls.create(
+                to=prospect,
+                from_=settings.twilio_phone_number,
+                url=f"{callback_base}/api/twilio/voice/click2call-prospect?conference={conference}",
+                status_callback=f"{callback_base}/api/twilio/status-callback",
+                status_callback_event=["initiated", "ringing", "answered", "completed"],
+                status_callback_method="POST",
+            )
+            logger.info("click2call_prospect_appele", prospect=prospect, conference=conference)
+        except Exception as e:
+            logger.error("click2call_prospect_erreur", error=str(e), prospect=prospect)
+
+    return Response(content=str(response), media_type="application/xml")
+
+
+@router.post("/voice/click2call-prospect", include_in_schema=False)
+async def click2call_prospect_webhook(request: Request):
+    """
+    Webhook appele quand le PROSPECT decroche.
+    Le place dans la meme conference que l'agent.
+    """
+    params = await _validate_twilio_signature(request)
+
+    conference = request.query_params.get("conference", "default")
+
+    logger.info("click2call_prospect_decroche", conference=conference)
+
+    response = VoiceResponse()
+    dial = Dial()
+    dial.conference(
+        conference,
+        start_conference_on_enter=True,
+        end_conference_on_exit=False,
+        beep=False,
+    )
+    response.append(dial)
+
+    return Response(content=str(response), media_type="application/xml")
 
 
 @router.post("/status-callback", include_in_schema=False)

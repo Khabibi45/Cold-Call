@@ -123,6 +123,40 @@ class TwilioService:
         return call.sid
 
     # ------------------------------------------------------------------
+    # Click-to-Call
+    # ------------------------------------------------------------------
+
+    def click_to_call(self, agent_phone: str, prospect_phone: str, conference_name: str) -> str:
+        """
+        Click-to-Call : appelle d'abord l'agent sur son telephone, puis le prospect.
+        1. Appelle le telephone de l'agent
+        2. Quand l'agent decroche, le TwiML le place dans une conference
+        3. En parallele, appelle le prospect et le place dans la meme conference
+        Retourne le call_sid de l'appel vers l'agent.
+        """
+        s = self._settings
+        callback_base = s.app_url.rstrip("/")
+
+        # Etape 1 : Appeler l'agent
+        agent_call = self.client.calls.create(
+            to=agent_phone,
+            from_=s.twilio_phone_number,
+            url=f"{callback_base}/api/twilio/voice/click2call-agent?conference={conference_name}&prospect={prospect_phone}",
+            status_callback=f"{callback_base}/api/twilio/status-callback",
+            status_callback_event=["initiated", "ringing", "answered", "completed"],
+            status_callback_method="POST",
+        )
+
+        logger.info(
+            "click_to_call_lance",
+            agent_call_sid=agent_call.sid,
+            agent_phone=agent_phone,
+            prospect_phone=prospect_phone,
+            conference=conference_name,
+        )
+        return agent_call.sid
+
+    # ------------------------------------------------------------------
     # Gestion des appels
     # ------------------------------------------------------------------
 

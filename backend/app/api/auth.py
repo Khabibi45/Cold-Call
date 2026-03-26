@@ -147,6 +147,10 @@ async def refresh(
     }
 
 
+class UpdatePhoneRequest(BaseModel):
+    phone_number: str | None = None
+
+
 @router.get("/me")
 async def me(current_user: User = Depends(get_current_user)):
     """Retourne les informations de l'utilisateur connecte. Protege par JWT."""
@@ -157,9 +161,22 @@ async def me(current_user: User = Depends(get_current_user)):
         "avatar_url": current_user.avatar_url,
         "is_admin": current_user.is_admin,
         "subscription_plan": current_user.subscription_plan,
+        "phone_number": current_user.phone_number,
         "created_at": current_user.created_at.isoformat() if current_user.created_at else None,
         "last_login": current_user.last_login.isoformat() if current_user.last_login else None,
     }
+
+
+@router.patch("/me/phone")
+async def update_phone(
+    data: UpdatePhoneRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Met a jour le numero de telephone de l'agent (Click-to-Call)."""
+    current_user.phone_number = data.phone_number
+    await db.flush()
+    return {"phone_number": current_user.phone_number}
 
 
 @router.post("/logout")
