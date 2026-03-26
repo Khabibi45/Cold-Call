@@ -41,6 +41,11 @@ function initNavigation() {
             document.getElementById(`section-${section}`).classList.add('active');
             document.getElementById('pageTitle').textContent = item.querySelector('span').textContent;
 
+            // Synchroniser la bottom nav mobile
+            document.querySelectorAll('.mobile-nav-btn').forEach(b => {
+                b.classList.toggle('active', b.dataset.section === section);
+            });
+
             // Charger les donnees specifiques a chaque onglet
             switch (section) {
                 case 'dashboard':
@@ -73,7 +78,42 @@ function initNavigation() {
     });
 
     const toggle = document.getElementById('sidebarToggle');
-    if (toggle) toggle.addEventListener('click', () => document.getElementById('sidebar').classList.toggle('mobile-open'));
+    if (toggle) {
+        toggle.addEventListener('click', () => {
+            const sidebar = document.getElementById('sidebar');
+            sidebar.classList.toggle('mobile-open');
+            // Overlay sombre pour fermer la sidebar en cliquant a cote
+            let overlay = document.getElementById('sidebarOverlay');
+            if (!overlay) {
+                overlay = document.createElement('div');
+                overlay.id = 'sidebarOverlay';
+                overlay.className = 'sidebar-overlay';
+                document.body.appendChild(overlay);
+                overlay.addEventListener('click', () => {
+                    sidebar.classList.remove('mobile-open');
+                    overlay.classList.remove('active');
+                });
+            }
+            overlay.classList.toggle('active', sidebar.classList.contains('mobile-open'));
+        });
+    }
+
+    // Bottom nav mobile — navigation par onglets
+    document.querySelectorAll('.mobile-nav-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+            const section = btn.dataset.section;
+            // Declencher le clic sur l'item sidebar correspondant
+            const sidebarItem = document.querySelector(`.nav-item[data-section="${section}"]`);
+            if (sidebarItem) sidebarItem.click();
+            // Mettre a jour la bottom nav active
+            document.querySelectorAll('.mobile-nav-btn').forEach(b => b.classList.remove('active'));
+            btn.classList.add('active');
+            // Fermer la sidebar si ouverte
+            document.getElementById('sidebar').classList.remove('mobile-open');
+            const overlay = document.getElementById('sidebarOverlay');
+            if (overlay) overlay.classList.remove('active');
+        });
+    });
 }
 
 // ============================================
@@ -1036,10 +1076,29 @@ function selectDisposition(code) {
 }
 
 async function startDialerSession() {
+    const isMobileDevice = window.innerWidth <= 480;
+
     document.getElementById('btnStartSession').style.display = 'none';
     document.getElementById('btnHangup').style.display = '';
     document.getElementById('btnSkip').style.display = '';
     document.getElementById('btnPause').style.display = '';
+
+    if (isMobileDevice) {
+        // Mode mobile : on utilise le lien tel: natif, pas de Twilio
+        simulationMode = false;
+        hideSimulationBanner();
+        updateCallStatus('MODE MOBILE — PRET');
+        // Charger le premier lead (le bouton tel: sera mis a jour automatiquement)
+        const lead = await apiFetch('/dialer/next');
+        if (lead && lead.id) {
+            currentLead = lead;
+            displayCurrentLead(lead);
+            updateCallStatus('PRET — Appuyez sur APPELER');
+        } else {
+            updateCallStatus('AUCUN LEAD DISPONIBLE');
+        }
+        return;
+    }
 
     if (dialMode === 'phone') {
         // Mode Click-to-Call : pas besoin du SDK Twilio dans le navigateur
@@ -1080,6 +1139,13 @@ async function loadNextLead() {
     currentLead = lead;
     displayCurrentLead(currentLead);
 
+    // Sur mobile, ne pas auto-lancer l'appel (l'utilisateur tape le lien tel:)
+    const isMobileDevice = window.innerWidth <= 480;
+    if (isMobileDevice) {
+        updateCallStatus('PRET — Appuyez sur APPELER');
+        return;
+    }
+
     // Auto-lancer l'appel (reel ou simulation)
     makeRealCall();
 }
@@ -1100,6 +1166,17 @@ function displayCurrentLead(lead) {
     } else {
         mapsLink.style.display = 'none';
     }
+    // Mettre a jour le bouton d'appel mobile (lien tel:)
+    const mobileCallBtn = document.getElementById('btnMobileCall');
+    if (mobileCallBtn && lead.phone) {
+        const cleanPhone = lead.phone.replace(/\s/g, '');
+        mobileCallBtn.href = `tel:${cleanPhone}`;
+        document.getElementById('btnMobileCallNumber').textContent = lead.phone;
+    } else if (mobileCallBtn) {
+        mobileCallBtn.href = 'tel:';
+        document.getElementById('btnMobileCallNumber').textContent = 'Pas de numero';
+    }
+
     // Reset disposition
     selectedDisposition = null;
     document.querySelectorAll('.disposition-btn').forEach(b => b.classList.remove('selected'));
@@ -1280,44 +1357,68 @@ async function loadLeads(page = 1) {
     const counter = document.getElementById('leadsCounter');
     if (counter) counter.textContent = data.total;
 
-    // Fleche de tri
-    const sortArrow = (col) => {
-        if (col === currentSortBy) return currentSortOrder === 'desc' ? ' ↓' : ' ↑';
-        return '';
-    };
+    // Detection mobile pour affichage en cartes
+    const isMobile = window.innerWidth <= 480;
 
-    document.getElementById('leadsTable').innerHTML = `
-        <table>
-            <thead>
-                <tr>
-                    <th onclick="sortLeads('business_name')" style="cursor:pointer">Entreprise${sortArrow('business_name')}</th>
-                    <th>Telephone</th>
-                    <th onclick="sortLeads('city')" style="cursor:pointer">Ville${sortArrow('city')}</th>
-                    <th onclick="sortLeads('category')" style="cursor:pointer">Categorie${sortArrow('category')}</th>
-                    <th onclick="sortLeads('rating')" style="cursor:pointer">Note${sortArrow('rating')}</th>
-                    <th onclick="sortLeads('review_count')" style="cursor:pointer">Avis${sortArrow('review_count')}</th>
-                    <th onclick="sortLeads('score')" style="cursor:pointer">Score${sortArrow('score')}</th>
-                    <th onclick="sortLeads('scraped_at')" style="cursor:pointer">Date${sortArrow('scraped_at')}</th>
-                    <th>Maps</th>
-                </tr>
-            </thead>
-            <tbody>
-                ${data.data.map(l => `
+    if (isMobile) {
+        // Mode cartes pour mobile — chaque lead = une carte tactile
+        document.getElementById('leadsTable').innerHTML = data.data.map(l => `
+            <div class="card" style="margin-bottom:8px">
+                <div style="display:flex;justify-content:space-between;align-items:start">
+                    <div style="flex:1;min-width:0">
+                        <div style="font-weight:700;font-size:0.95rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${l.business_name}</div>
+                        <div style="font-size:0.8rem;color:var(--text-muted);margin-top:2px">${l.category || ''} — ${l.city || ''}</div>
+                    </div>
+                    <span style="background:var(--accent);color:#fff;padding:2px 8px;border-radius:6px;font-size:0.75rem;font-weight:700;flex-shrink:0;margin-left:8px">${l.lead_score}</span>
+                </div>
+                ${l.phone ? `<a href="tel:${l.phone.replace(/\\s/g, '')}" style="display:flex;align-items:center;gap:6px;margin-top:10px;padding:10px;background:rgba(34,197,94,0.1);border-radius:8px;color:var(--success);font-weight:600;text-decoration:none;font-size:0.95rem;min-height:44px"><i class="fa-solid fa-phone"></i> ${l.phone}</a>` : ''}
+                <div style="display:flex;gap:8px;margin-top:8px;align-items:center">
+                    ${l.rating ? `<span style="font-size:0.8rem;color:var(--warning)"><i class="fa-solid fa-star"></i> ${l.rating}/5</span>` : ''}
+                    ${l.review_count ? `<span style="font-size:0.75rem;color:var(--text-muted)">(${l.review_count} avis)</span>` : ''}
+                    ${l.maps_url ? `<a href="${l.maps_url}" target="_blank" style="display:inline-flex;align-items:center;gap:4px;margin-left:auto;font-size:0.8rem;color:var(--accent);text-decoration:none;min-height:44px;padding:0 8px"><i class="fa-solid fa-map"></i> Maps</a>` : ''}
+                </div>
+            </div>
+        `).join('');
+    } else {
+        // Mode tableau classique pour desktop
+        const sortArrow = (col) => {
+            if (col === currentSortBy) return currentSortOrder === 'desc' ? ' ↓' : ' ↑';
+            return '';
+        };
+
+        document.getElementById('leadsTable').innerHTML = `
+            <table>
+                <thead>
                     <tr>
-                        <td style="font-weight:600">${l.business_name}</td>
-                        <td>${l.phone ? `<a href="tel:${l.phone}" style="color:var(--accent)">${l.phone}</a>` : '—'}</td>
-                        <td>${l.city || '—'}</td>
-                        <td><span class="badge" style="background:rgba(99,102,241,0.12);color:var(--accent)">${l.category || '—'}</span></td>
-                        <td>${l.rating ? l.rating + '/5' : '—'}</td>
-                        <td>${l.review_count || 0}</td>
-                        <td><strong>${l.lead_score}</strong></td>
-                        <td style="font-size:0.78rem;color:var(--text-muted)">${l.scraped_at ? formatDate(l.scraped_at) : '—'}</td>
-                        <td>${l.maps_url ? `<a href="${l.maps_url}" target="_blank" class="btn btn-sm btn-outline"><i class="fa-solid fa-map"></i></a>` : '—'}</td>
+                        <th onclick="sortLeads('business_name')" style="cursor:pointer">Entreprise${sortArrow('business_name')}</th>
+                        <th>Telephone</th>
+                        <th onclick="sortLeads('city')" style="cursor:pointer">Ville${sortArrow('city')}</th>
+                        <th onclick="sortLeads('category')" style="cursor:pointer">Categorie${sortArrow('category')}</th>
+                        <th onclick="sortLeads('rating')" style="cursor:pointer">Note${sortArrow('rating')}</th>
+                        <th onclick="sortLeads('review_count')" style="cursor:pointer">Avis${sortArrow('review_count')}</th>
+                        <th onclick="sortLeads('score')" style="cursor:pointer">Score${sortArrow('score')}</th>
+                        <th onclick="sortLeads('scraped_at')" style="cursor:pointer">Date${sortArrow('scraped_at')}</th>
+                        <th>Maps</th>
                     </tr>
-                `).join('')}
-            </tbody>
-        </table>
-    `;
+                </thead>
+                <tbody>
+                    ${data.data.map(l => `
+                        <tr>
+                            <td style="font-weight:600">${l.business_name}</td>
+                            <td>${l.phone ? `<a href="tel:${l.phone}" style="color:var(--accent)">${l.phone}</a>` : '—'}</td>
+                            <td>${l.city || '—'}</td>
+                            <td><span class="badge" style="background:rgba(99,102,241,0.12);color:var(--accent)">${l.category || '—'}</span></td>
+                            <td>${l.rating ? l.rating + '/5' : '—'}</td>
+                            <td>${l.review_count || 0}</td>
+                            <td><strong>${l.lead_score}</strong></td>
+                            <td style="font-size:0.78rem;color:var(--text-muted)">${l.scraped_at ? formatDate(l.scraped_at) : '—'}</td>
+                            <td>${l.maps_url ? `<a href="${l.maps_url}" target="_blank" class="btn btn-sm btn-outline"><i class="fa-solid fa-map"></i></a>` : '—'}</td>
+                        </tr>
+                    `).join('')}
+                </tbody>
+            </table>
+        `;
+    }
 
     // Pagination
     renderPagination(data.page, data.pages, data.total);

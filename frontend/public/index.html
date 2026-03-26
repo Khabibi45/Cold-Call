@@ -2,7 +2,11 @@
 <html lang="fr">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <!-- iPhone web app -->
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="apple-mobile-web-app-title" content="ColdCall">
     <title>Cold Call Platform — Turbine a Appels</title>
     <meta name="description" content="Plateforme de cold calling avec scraper Google Maps, power dialer et CRM integre">
     <meta property="og:title" content="Cold Call Platform">
@@ -211,6 +215,11 @@
                             <i class="fa-solid fa-pause"></i> Pause
                         </button>
                     </div>
+                    <!-- Bouton appel mobile (lien tel:) — visible uniquement sur mobile -->
+                    <a id="btnMobileCall" href="tel:" class="btn-mobile-call">
+                        <i class="fa-solid fa-phone"></i>
+                        <span id="btnMobileCallNumber">Appeler</span>
+                    </a>
                 </div>
 
                 <!-- Panneau droit : disposition + notes -->
@@ -430,6 +439,26 @@
         </section>
 
     </main>
+
+    <!-- Navigation mobile bas d'ecran (style iOS) -->
+    <nav class="mobile-bottom-nav" id="mobileBottomNav">
+        <button data-section="dashboard" class="mobile-nav-btn active">
+            <i class="fa-solid fa-chart-line"></i>
+            <span>Dashboard</span>
+        </button>
+        <button data-section="dialer" class="mobile-nav-btn">
+            <i class="fa-solid fa-phone"></i>
+            <span>Appeler</span>
+        </button>
+        <button data-section="leads" class="mobile-nav-btn">
+            <i class="fa-solid fa-database"></i>
+            <span>Leads</span>
+        </button>
+        <button data-section="profil" class="mobile-nav-btn">
+            <i class="fa-solid fa-user"></i>
+            <span>Profil</span>
+        </button>
+    </nav>
 
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
     <script src="https://media.twiliocdn.com/sdk/js/voice/releases/2.12/twilio.min.js"></script>

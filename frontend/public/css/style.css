@@ -489,13 +489,187 @@ tr:hover { background: var(--bg-hover); }
     }
 }
 
-/* --- Responsive mobile --- */
+/* --- Responsive mobile (tablette petite / grand telephone) --- */
 @media (max-width: 768px) {
-    .sidebar { transform: translateX(-100%); transition: transform 0.3s; }
+    .sidebar { transform: translateX(-100%); transition: transform 0.3s; width: 280px; }
     .sidebar.mobile-open { transform: translateX(0); }
     .sidebar-toggle { display: block; }
     .main-content { margin-left: 0; }
     .dialer-container { grid-template-columns: 1fr; }
     .stats-grid { grid-template-columns: repeat(2, 1fr); }
     .auth-card { margin: 16px; }
+    .dashboard-grid { grid-template-columns: 1fr; }
+    .filters-bar { flex-direction: column; align-items: stretch; }
+    .filters-bar input, .filters-bar select { width: 100%; }
+}
+
+/* --- Bottom navigation mobile --- */
+.mobile-bottom-nav {
+    display: none;
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    background: var(--bg-card);
+    border-top: 1px solid var(--border);
+    z-index: 1000;
+    padding: 6px 0;
+    padding-bottom: env(safe-area-inset-bottom, 6px); /* Support iPhone home bar */
+}
+.mobile-nav-btn {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 2px;
+    background: none;
+    border: none;
+    color: var(--text-muted);
+    font-size: 0.65rem;
+    cursor: pointer;
+    padding: 4px;
+    transition: color 0.15s;
+}
+.mobile-nav-btn i { font-size: 1.1rem; }
+.mobile-nav-btn.active { color: var(--accent); }
+
+/* --- Bouton d'appel mobile (lien tel:) --- */
+.btn-mobile-call {
+    display: none; /* Cache par defaut, visible en media query mobile */
+    width: 100%;
+    padding: 18px;
+    background: var(--success);
+    color: #fff;
+    border-radius: 14px;
+    font-size: 1.2rem;
+    font-weight: 700;
+    text-align: center;
+    text-decoration: none;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    min-height: 60px;
+    box-shadow: 0 4px 15px rgba(34, 197, 94, 0.3);
+    transition: transform 0.1s;
+}
+.btn-mobile-call:active {
+    transform: scale(0.97);
+}
+
+/* --- Overlay sombre quand sidebar mobile ouverte --- */
+.sidebar-overlay {
+    display: none;
+    position: fixed;
+    top: 0; left: 0; right: 0; bottom: 0;
+    background: rgba(0, 0, 0, 0.5);
+    z-index: 99;
+}
+.sidebar-overlay.active { display: block; }
+
+/* --- iPhone (max-width: 480px) --- */
+@media (max-width: 480px) {
+    /* Safe areas iPhone */
+    html {
+        padding: env(safe-area-inset-top) env(safe-area-inset-right) 0 env(safe-area-inset-left);
+    }
+
+    /* Bottom nav visible */
+    .mobile-bottom-nav { display: flex; }
+
+    /* Espace pour la bottom nav en bas */
+    .main-content { padding-bottom: 70px; }
+    .content-section { padding: 12px; padding-bottom: 80px; }
+
+    /* Sidebar cachee avec animation */
+    .sidebar {
+        transform: translateX(-100%);
+        width: 280px;
+        transition: transform 0.3s ease;
+    }
+    .sidebar.mobile-open { transform: translateX(0); }
+    .main-content { margin-left: 0; }
+
+    /* Top bar compacte */
+    .top-bar { padding: 10px 16px; }
+    .top-bar h2 { font-size: 0.95rem; }
+    .sidebar-toggle { display: block !important; }
+
+    /* Stats 2 colonnes avec gap reduit */
+    .stats-grid { grid-template-columns: repeat(2, 1fr); gap: 8px; }
+    .stat-card { padding: 12px; }
+    .stat-value { font-size: 1.4rem; }
+    .stat-label { font-size: 0.68rem; }
+
+    /* Dashboard grid 1 colonne */
+    .dashboard-grid { grid-template-columns: 1fr; }
+
+    /* Dialer 1 colonne empilee */
+    .dialer-container {
+        grid-template-columns: 1fr !important;
+        gap: 12px;
+        min-height: auto;
+    }
+    .dialer-info-panel { order: 1; }
+    .dialer-control-panel { order: 2; }
+    .dialer-disposition-panel { order: 3; }
+
+    /* Timer geant visible pendant l'appel */
+    .call-timer { font-size: 2.5rem; }
+    .call-status { font-size: 0.95rem; }
+
+    /* Bouton APPELER mobile visible (lien tel:) */
+    .btn-mobile-call { display: flex !important; }
+
+    /* Cacher les boutons WebRTC/Twilio sur mobile */
+    #btnStartSession, #btnHangup, #btnPause { display: none !important; }
+    #simulationBanner { display: none !important; }
+    #micIndicator { display: none !important; }
+
+    /* Bouton Skip reste visible sur mobile */
+    #btnSkip { min-height: 44px; }
+
+    /* Disposition 3 colonnes pour le doigt */
+    .disposition-grid { grid-template-columns: repeat(3, 1fr); gap: 8px; }
+    .disposition-btn {
+        padding: 12px 6px;
+        font-size: 0.72rem;
+        min-height: 44px; /* Minimum Apple touch target */
+    }
+
+    /* Cards compactes */
+    .card { padding: 14px; margin-bottom: 12px; }
+    .card h3 { font-size: 0.88rem; }
+
+    /* Filtres en colonne */
+    .filters-bar { flex-direction: column; align-items: stretch; }
+    .filters-bar input, .filters-bar select { width: 100%; }
+
+    /* Boutons plus grands pour le tactile (minimum 44px Apple) */
+    .btn { min-height: 44px; }
+    .btn-lg {
+        padding: 16px 24px;
+        font-size: 1.1rem;
+        width: 100%;
+        justify-content: center;
+    }
+
+    /* Heatmap scroll horizontal */
+    .heatmap-grid { overflow-x: auto; min-width: 600px; }
+
+    /* Profil 1 colonne */
+    #section-profil > div { grid-template-columns: 1fr !important; }
+
+    /* Auth card plein ecran */
+    .auth-card { margin: 16px; max-width: none; }
+
+    /* Tables : scroll horizontal en fallback */
+    table { display: block; overflow-x: auto; white-space: nowrap; }
+    thead { display: table-header-group; }
+
+    /* Toast au dessus de la bottom nav */
+    .toast { bottom: 80px; right: 16px; left: 16px; }
+
+    /* Scraper form en colonne */
+    .form-row { flex-direction: column; }
+    .form-row .btn { width: 100%; }
 }
