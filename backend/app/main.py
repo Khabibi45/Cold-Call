@@ -133,3 +133,6 @@ app.include_router(twilio_router, prefix="/api/twilio", tags=["Twilio"])
 app.include_router(export_router, prefix="/api/export", tags=["Export"])
 app.include_router(oauth_router, prefix="/api/auth", tags=["OAuth2"])
 app.include_router(ws_router, prefix="/api", tags=["WebSocket"])
+
+from app.api.test_runner import router as tests_router
+app.include_router(tests_router, prefix="/api/tests", tags=["Tests"])

@@ -66,6 +66,8 @@ function initNavigation() {
                 case 'profil':
                     loadProfil();
                     break;
+                case 'tests':
+                    break;
             }
         });
     });
@@ -1964,4 +1966,99 @@ function formatTime(isoStr) {
     } catch {
         return '';
     }
+}
+
+// ============================================
+// TESTS FONCTIONNELS
+// ============================================
+async function runAllTests() {
+    const btn = document.getElementById('btnRunTests');
+    const summaryEl = document.getElementById('testsSummary');
+    const resultsEl = document.getElementById('testsResults');
+
+    // Loading state
+    btn.disabled = true;
+    btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Tests en cours...';
+    summaryEl.innerHTML = '<div class="skeleton" style="height:80px;width:100%"></div>';
+    resultsEl.innerHTML = '';
+
+    const data = await apiFetch('/tests/run');
+
+    btn.disabled = false;
+    btn.innerHTML = '<i class="fa-solid fa-play"></i> Relancer les tests';
+
+    if (!data) {
+        summaryEl.innerHTML = '<div class="card" style="border-left:3px solid var(--danger)"><p style="color:var(--danger)"><i class="fa-solid fa-xmark"></i> Impossible de lancer les tests (erreur API)</p></div>';
+        return;
+    }
+
+    const s = data.summary;
+    const allPassed = s.failed === 0;
+
+    // Resume
+    summaryEl.innerHTML = `
+        <div class="stats-grid">
+            ${renderStatCards([
+                { label: 'Total tests', value: s.total, icon: 'fa-flask-vial', color: 'var(--accent)' },
+                { label: 'Reussis', value: s.passed, icon: 'fa-circle-check', color: 'var(--success)' },
+                { label: 'Echoues', value: s.failed, icon: 'fa-circle-xmark', color: 'var(--danger)' },
+                { label: 'Taux', value: s.success_rate, icon: 'fa-percentage', color: allPassed ? 'var(--success)' : 'var(--warning)' },
+                { label: 'Duree', value: s.duration_ms + 'ms', icon: 'fa-stopwatch', color: 'var(--info)' },
+            ])}
+        </div>
+        <div class="card" style="border-left:3px solid ${allPassed ? 'var(--success)' : 'var(--danger)'}; margin-top:12px">
+            <p style="font-size:0.95rem;font-weight:600;color:${allPassed ? 'var(--success)' : 'var(--danger)'}">
+                ${allPassed
+                    ? '<i class="fa-solid fa-circle-check"></i> Tous les tests sont passes — la plateforme est fonctionnelle'
+                    : `<i class="fa-solid fa-triangle-exclamation"></i> ${s.failed} test(s) en echec — voir les details ci-dessous`
+                }
+            </p>
+            <p style="font-size:0.78rem;color:var(--text-muted);margin-top:4px">
+                Execute le ${new Date(s.timestamp).toLocaleString('fr-FR')}
+            </p>
+        </div>
+    `;
+
+    // Details par test
+    resultsEl.innerHTML = `
+        <div class="card">
+            <h3><i class="fa-solid fa-list-check"></i> Detail des tests</h3>
+            <table style="width:100%;border-collapse:collapse">
+                <thead>
+                    <tr style="border-bottom:2px solid var(--border)">
+                        <th style="padding:8px;text-align:left;color:var(--text-muted);font-size:0.78rem">Statut</th>
+                        <th style="padding:8px;text-align:left;color:var(--text-muted);font-size:0.78rem">Test</th>
+                        <th style="padding:8px;text-align:left;color:var(--text-muted);font-size:0.78rem">Description</th>
+                        <th style="padding:8px;text-align:left;color:var(--text-muted);font-size:0.78rem">Detail</th>
+                        <th style="padding:8px;text-align:right;color:var(--text-muted);font-size:0.78rem">Duree</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    ${data.tests.map(t => {
+                        const isPassed = t.status === 'PASS';
+                        const icon = isPassed ? 'fa-circle-check' : 'fa-circle-xmark';
+                        const color = isPassed ? 'var(--success)' : 'var(--danger)';
+                        const bg = isPassed ? 'rgba(34,197,94,0.06)' : 'rgba(239,68,68,0.06)';
+                        return `
+                            <tr style="border-bottom:1px solid var(--border);background:${bg}">
+                                <td style="padding:8px"><i class="fa-solid ${icon}" style="color:${color};font-size:1.1rem"></i></td>
+                                <td style="padding:8px;font-weight:600;font-size:0.85rem;font-family:monospace">${t.name}</td>
+                                <td style="padding:8px;font-size:0.85rem;color:var(--text-muted)">${t.description}</td>
+                                <td style="padding:8px;font-size:0.8rem;color:${isPassed ? 'var(--text-muted)' : 'var(--danger)'}; max-width:300px;word-break:break-all">${t.detail}</td>
+                                <td style="padding:8px;text-align:right;font-size:0.78rem;color:var(--text-muted)">${t.duration_ms}ms</td>
+                            </tr>`;
+                    }).join('')}
+                </tbody>
+            </table>
+        </div>
+    `;
+
+    // Log en console pour debug
+    console.group('%c[TESTS] Resultats', 'color:#6366f1;font-weight:bold');
+    console.log(`%c${s.passed}/${s.total} passes (${s.success_rate}) en ${s.duration_ms}ms`, allPassed ? 'color:green' : 'color:red');
+    data.tests.forEach(t => {
+        const style = t.status === 'PASS' ? 'color:green' : 'color:red;font-weight:bold';
+        console.log(`%c${t.status === 'PASS' ? '✓' : '✗'} ${t.name}%c — ${t.detail}`, style, 'color:gray');
+    });
+    console.groupEnd();
 }

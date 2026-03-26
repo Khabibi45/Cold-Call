@@ -104,6 +104,10 @@
                     <i class="fa-solid fa-gear"></i>
                     <span>Parametres</span>
                 </li>
+                <li class="nav-item" data-section="tests">
+                    <i class="fa-solid fa-flask-vial"></i>
+                    <span>Tests</span>
+                </li>
             </ul>
         </nav>
         <div class="sidebar-footer">
@@ -409,6 +413,22 @@
                 </button>
             </div>
         </section>
+
+        <!-- ============ SECTION: TESTS ============ -->
+        <section class="content-section" id="section-tests">
+            <div class="section-header" style="display:flex;align-items:center;justify-content:space-between;margin-bottom:20px">
+                <div>
+                    <h2>Tests fonctionnels</h2>
+                    <p style="color:var(--text-muted);font-size:0.88rem">Verification automatique de chaque composant de la plateforme</p>
+                </div>
+                <button class="btn btn-primary" id="btnRunTests" onclick="runAllTests()">
+                    <i class="fa-solid fa-play"></i> Lancer les tests
+                </button>
+            </div>
+            <div id="testsSummary"></div>
+            <div id="testsResults" style="margin-top:16px"></div>
+        </section>
+
     </main>
 
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
