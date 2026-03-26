@@ -557,15 +557,16 @@ class ScraperService:
         await _api_cap.increment(1)
         logger.info("api_cap_foursquare", **(await _api_cap.stats()))
 
-        url = "https://api.foursquare.com/v3/places/search"
+        url = "https://places-api.foursquare.com/places/search"
         params = {
             "query": query,
-            "near": city,
-            "limit": min(limit, 50),  # Foursquare limite a 50 par requete
+            "near": f"{city}, France",
+            "limit": min(limit, 50),
             "fields": "name,location,tel,website,rating,categories,photos",
         }
         headers = {
-            "Authorization": settings.foursquare_api_key,
+            "Authorization": f"Bearer {settings.foursquare_api_key}",
+            "X-Places-Api-Version": "2025-06-17",
             "Accept": "application/json",
         }
 
