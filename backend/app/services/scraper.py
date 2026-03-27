@@ -709,6 +709,14 @@ class ScraperService:
         if len(self._lead_buffer) >= 10 or (now - self._last_lead_broadcast) >= 5.0:
             await self._flush_lead_buffer()
 
+    async def _broadcast_stats_now(self, stats: dict) -> None:
+        """Force un broadcast immediat des stats globales."""
+        try:
+            from app.api.websocket import manager
+            await manager.broadcast({"type": "stats", "data": stats})
+        except Exception:
+            pass
+
     async def _maybe_broadcast_stats(self) -> None:
         """Broadcaster les stats max 1 fois toutes les 5 secondes."""
         now = time.monotonic()
@@ -852,8 +860,8 @@ class ScraperService:
     # Pipeline complet : scrape → dedup → insert (avec memoire ScrapeJob)
     # ------------------------------------------------------------------
     async def run_scrape(self, query: str, city: str, limit: int = 100) -> dict:
-        """Lance un scrape complet : ScrapeJob memoire → API → parse → dedup → insert.
-        Utilise le ScrapeJob pour savoir ou reprendre (skip/offset).
+        """Lance un scrape complet multi-categories.
+        Scrape la query principale PUIS toutes les sous-categories automatiquement.
         """
         self._running = True
         self._should_stop = False
@@ -864,50 +872,74 @@ class ScraperService:
         self._last_lead_broadcast = time.monotonic()
         self._last_stats_broadcast = 0.0
 
-        # Recuperer ou creer le ScrapeJob (memoire persistante)
-        try:
-            job, is_resume = await self._get_or_create_job(query, city)
-            self._current_job_id = job.id
-            skip_offset = job.last_offset if is_resume else 0
-        except RuntimeError as e:
-            self._running = False
-            raise
+        # Construire la liste de queries : principale + sous-categories
+        queries_to_run = [query]
+        subcats = SUGGESTED_SUBCATEGORIES.get(query, [])
+        queries_to_run.extend(subcats)
+        logger.info("Scrape multi-categories : %d queries pour '%s' a %s", len(queries_to_run), query, city)
 
-        max_retries = 3
-        attempt = 0
+        total_stats = {"total": 0, "inserted": 0, "duplicates": 0, "errors": 0}
 
-        while attempt < max_retries and not self._should_stop:
-            attempt += 1
+        for i, current_query in enumerate(queries_to_run):
+            if self._should_stop:
+                logger.info("Scrape arrete par l'utilisateur")
+                break
+
+            # Verifier le cap avant chaque sous-query
             try:
-                # 1. Appel API Outscraper (si configure)
-                all_results = []
-                if self.is_outscraper_configured:
-                    logger.info(
-                        "Scrape Outscraper : query=%s city=%s limit=%d skip=%d (ScrapeJob #%d)",
-                        query, city, limit, skip_offset, job.id,
-                    )
-                    outscraper_results = await self.scrape_outscraper(
-                        query, city, limit, skip=skip_offset,
-                    )
-                    all_results.extend(outscraper_results)
-                    logger.info("Outscraper retourne %d resultats", len(outscraper_results))
+                await _api_cap.check_or_raise(needed=1)
+            except APICapExceeded as e:
+                logger.warning("Cap mensuel atteint : %s", e)
+                break
 
-                # Fix #6 : Appel Foursquare (si configure)
-                if self.is_foursquare_configured:
-                    logger.info("Scrape Foursquare : query=%s city=%s", query, city)
+            logger.info("Scrape [%d/%d] : '%s' a %s", i + 1, len(queries_to_run), current_query, city)
+            self._current_query = current_query
+
+            # Recuperer ou creer le ScrapeJob
+            try:
+                job, is_resume = await self._get_or_create_job(current_query, city)
+                self._current_job_id = job.id
+                skip_offset = job.last_offset if is_resume else 0
+            except RuntimeError:
+                continue  # Job deja running, passer a la sous-categorie suivante
+
+            # Reset stats pour cette query
+            self._stats = {"total": 0, "inserted": 0, "duplicates": 0, "errors": 0, "no_phone": 0}
+
+            try:
+                all_results = []
+
+                # Outscraper (si configure)
+                if self.is_outscraper_configured:
                     try:
-                        foursquare_results = await self.scrape_foursquare(query, city, min(limit, 50))
+                        outscraper_results = await self.scrape_outscraper(
+                            current_query, city, limit, skip=skip_offset,
+                        )
+                        all_results.extend(outscraper_results)
+                        logger.info("Outscraper '%s' : %d resultats", current_query, len(outscraper_results))
+                    except (APICapExceeded, ValueError) as e:
+                        logger.warning("Outscraper skip : %s", e)
+
+                # Foursquare (si configure)
+                if self.is_foursquare_configured:
+                    try:
+                        foursquare_results = await self.scrape_foursquare(
+                            current_query, city, min(limit, 50),
+                        )
                         all_results.extend(foursquare_results)
-                        logger.info("Foursquare retourne %d resultats", len(foursquare_results))
+                        logger.info("Foursquare '%s' : %d resultats", current_query, len(foursquare_results))
+                    except (APICapExceeded, ValueError) as e:
+                        logger.warning("Foursquare skip : %s", e)
                     except Exception as e:
-                        logger.warning("Erreur Foursquare (non-bloquant) : %s", e)
+                        logger.warning("Erreur Foursquare '%s' (non-bloquant) : %s", current_query, e)
 
                 self._stats["total"] = len(all_results)
 
-                # 2. Traitement des resultats
-                await self._process_results(all_results)
+                # Traiter les resultats
+                if all_results:
+                    await self._process_results(all_results)
 
-                # 3. Mettre a jour le ScrapeJob avec les stats
+                # Mettre a jour le job
                 new_offset = skip_offset + len(all_results)
                 await self._update_job(
                     job.id,
@@ -917,38 +949,42 @@ class ScraperService:
                     total_duplicates=(job.total_duplicates or 0) + self._stats["duplicates"],
                     total_errors=(job.total_errors or 0) + self._stats["errors"],
                 )
+                await self._complete_job(job.id)
 
-                # 4. Si Outscraper ne retourne plus de resultats → marquer completed
-                if len(all_results) == 0:
-                    logger.info("Outscraper ne retourne plus de resultats — ScrapeJob #%d termine", job.id)
-                    await self._complete_job(job.id)
-                else:
-                    await self._complete_job(job.id)
+                # Accumuler les stats globales
+                total_stats["total"] += self._stats["total"]
+                total_stats["inserted"] += self._stats["inserted"]
+                total_stats["duplicates"] += self._stats["duplicates"]
+                total_stats["errors"] += self._stats["errors"]
 
-                # 5. Checkpoint Redis (compatibilite)
-                await self._clear_checkpoint()
+                # Broadcast les stats globales
+                await self._broadcast_stats_now(total_stats)
 
-                # Sortir de la boucle de recovery
+                # Pause entre les requetes (respect rate limit)
+                if i < len(queries_to_run) - 1:
+                    await asyncio.sleep(2)
+
+            except APICapExceeded:
+                logger.warning("Cap atteint pendant le scrape de '%s'", current_query)
                 break
-
             except Exception as e:
-                logger.error(
-                    "Crash scrape (tentative %d/%d) : %s",
-                    attempt, max_retries, e,
-                )
-                if attempt < max_retries and not self._should_stop:
-                    logger.info("Attente 30s avant reprise...")
-                    await asyncio.sleep(30)
-                    await self._save_checkpoint(query, city, "all", 1, skip_offset)
-                else:
-                    await self._fail_job(job.id, str(e))
-                    logger.error("Scrape abandonne apres %d tentatives", max_retries)
-                    raise
+                logger.error("Erreur scrape '%s' : %s", current_query, e)
+                total_stats["errors"] += 1
+                continue  # Passer a la sous-categorie suivante
 
+        # Flush le buffer de leads restant
+        await self._flush_lead_buffer()
+
+        # Stats finales
+        self._stats = total_stats
         self._running = False
         self._current_job_id = None
-        logger.info("Scrape termine : %s", self._stats)
-        return self._stats
+        await self._clear_checkpoint()
+        logger.info(
+            "Scrape multi-categories termine : %d queries, %d trouves, %d inseres, %d doublons",
+            len(queries_to_run), total_stats["total"], total_stats["inserted"], total_stats["duplicates"],
+        )
+        return total_stats
 
     # ------------------------------------------------------------------
     # Controle du scrape async
