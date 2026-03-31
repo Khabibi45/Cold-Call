@@ -37,6 +37,7 @@ twilio>=9.0,<10.0
 # --- Scraping ---
 phonenumbers>=8.13
 pybloom-live>=4.0,<5.0
+playwright>=1.40
 
 # --- Paiements ---
 stripe>=10.0,<12.0

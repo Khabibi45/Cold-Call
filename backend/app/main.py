@@ -136,3 +136,6 @@ app.include_router(ws_router, prefix="/api", tags=["WebSocket"])
 
 from app.api.test_runner import router as tests_router
 app.include_router(tests_router, prefix="/api/tests", tags=["Tests"])
+
+from app.api.maps_scraper import router as maps_scraper_router
+app.include_router(maps_scraper_router, prefix="/api/maps-scraper", tags=["Google Maps Scraper"])

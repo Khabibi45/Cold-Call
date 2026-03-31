@@ -280,6 +280,13 @@
                 <h3><i class="fa-solid fa-spider"></i> Controle du Scraper</h3>
                 <div class="form-row">
                     <div class="form-group">
+                        <label>Mode</label>
+                        <select id="scraperMode">
+                            <option value="maps">Google Maps (gratuit, pas d'API)</option>
+                            <option value="api">API (Outscraper/Foursquare)</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
                         <label>Ville cible</label>
                         <input type="text" id="scraperCity" value="Toulouse" placeholder="ex: Toulouse, Albi..." onchange="loadScraperSuggestions()">
                     </div>

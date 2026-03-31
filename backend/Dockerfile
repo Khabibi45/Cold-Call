@@ -16,7 +16,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY requirements.in .
 RUN pip install --no-cache-dir pip-tools && \
     pip-compile requirements.in -o requirements.txt && \
-    pip install --no-cache-dir -r requirements.txt
+    pip install --no-cache-dir -r requirements.txt && \
+    playwright install chromium --with-deps
 
 # Copier l'application
 COPY app/ app/

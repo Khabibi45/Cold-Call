@@ -1715,26 +1715,35 @@ async function startScraper() {
     const city = document.getElementById('scraperCity').value || 'Toulouse';
     const category = document.getElementById('scraperCategory').value || 'restaurant';
     const feed = document.getElementById('scraperFeed');
+    const mode = document.getElementById('scraperMode')?.value || 'maps';
 
-    // 1. Verifier le cap mensuel AVANT de lancer
-    const cap = await apiFetch('/scraper/cap');
-    if (cap) {
-        if (cap.blocked) {
+    // Mode API : verifier le cap mensuel AVANT de lancer
+    if (mode === 'api') {
+        const cap = await apiFetch('/scraper/cap');
+        if (cap) {
+            if (cap.blocked) {
+                if (feed) feed.innerHTML = `
+                    <div class="card" style="border-left:3px solid var(--danger);margin-top:12px">
+                        <p style="color:var(--danger);font-weight:600"><i class="fa-solid fa-ban"></i> CAP MENSUEL ATTEINT</p>
+                        <p style="color:var(--text-muted);font-size:0.85rem;margin-top:6px">
+                            ${cap.used}/${cap.cap} requetes utilisees ce mois-ci (${cap.month}).<br>
+                            Le scraper est bloque jusqu'au mois prochain. Aucun frais facture.
+                        </p>
+                    </div>`;
+                updateScraperStats('Cap atteint');
+                return;
+            }
+            // Afficher le cap restant
             if (feed) feed.innerHTML = `
-                <div class="card" style="border-left:3px solid var(--danger);margin-top:12px">
-                    <p style="color:var(--danger);font-weight:600"><i class="fa-solid fa-ban"></i> CAP MENSUEL ATTEINT</p>
-                    <p style="color:var(--text-muted);font-size:0.85rem;margin-top:6px">
-                        ${cap.used}/${cap.cap} requetes utilisees ce mois-ci (${cap.month}).<br>
-                        Le scraper est bloque jusqu'au mois prochain. Aucun frais facture.
-                    </p>
+                <div style="padding:8px 12px;background:rgba(99,102,241,0.1);border-radius:8px;margin-bottom:12px;font-size:0.85rem;color:var(--accent)">
+                    <i class="fa-solid fa-gauge"></i> Credits restants : ${cap.remaining}/${cap.cap} (${cap.percent_used}% utilise)
                 </div>`;
-            updateScraperStats('Cap atteint');
-            return;
         }
-        // Afficher le cap restant
+    } else {
+        // Mode Maps : pas de cap, afficher un message
         if (feed) feed.innerHTML = `
-            <div style="padding:8px 12px;background:rgba(99,102,241,0.1);border-radius:8px;margin-bottom:12px;font-size:0.85rem;color:var(--accent)">
-                <i class="fa-solid fa-gauge"></i> Credits restants : ${cap.remaining}/${cap.cap} (${cap.percent_used}% utilise)
+            <div style="padding:8px 12px;background:rgba(34,197,94,0.1);border-radius:8px;margin-bottom:12px;font-size:0.85rem;color:var(--success)">
+                <i class="fa-solid fa-map-location-dot"></i> Mode Google Maps — gratuit, pas d'API
             </div>`;
     }
 
@@ -1746,17 +1755,23 @@ async function startScraper() {
     scraperErrors = 0;
 
     updateScraperStats('Demarrage...');
-    connectScraperWebSocket();
+    if (mode === 'api') connectScraperWebSocket();
+
+    // Choisir l'endpoint selon le mode
+    const endpoint = mode === 'maps' ? '/maps-scraper/start' : '/scraper/start';
+    const bodyPayload = mode === 'maps'
+        ? { query: category, city: city }
+        : { query: category, city: city, limit: 100 };
 
     // 2. Lancer le scrape — capturer les erreurs detaillees
     try {
-        const res = await fetch(`${API}/scraper/start`, {
+        const res = await fetch(`${API}${endpoint}`, {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
                 ...(accessToken ? { 'Authorization': `Bearer ${accessToken}` } : {}),
             },
-            body: JSON.stringify({ query: category, city: city, limit: 100 }),
+            body: JSON.stringify(bodyPayload),
         });
         const data = await res.json();
 
@@ -1781,8 +1796,9 @@ async function startScraper() {
             </div>`;
 
         // 3. Poller le statut toutes les 3s pour afficher la progression
+        const statusEndpoint = mode === 'maps' ? '/maps-scraper/status' : '/scraper/status';
         const pollInterval = setInterval(async () => {
-            const status = await apiFetch('/scraper/status');
+            const status = await apiFetch(statusEndpoint);
             if (status) {
                 scraperLeadsFound = status.stats?.inserted || 0;
                 scraperDuplicates = status.stats?.duplicates || 0;
@@ -1827,8 +1843,10 @@ async function startScraper() {
 }
 
 async function stopScraper() {
-    // Arreter le scrape cote backend
-    await apiFetch('/scraper/stop', { method: 'POST' });
+    // Arreter le scrape cote backend (les deux endpoints, au cas ou)
+    const mode = document.getElementById('scraperMode')?.value || 'maps';
+    const stopEndpoint = mode === 'maps' ? '/maps-scraper/stop' : '/scraper/stop';
+    await apiFetch(stopEndpoint, { method: 'POST' });
 
     // Fermer le WebSocket
     disconnectScraperWebSocket();
