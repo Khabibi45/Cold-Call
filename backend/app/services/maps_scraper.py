@@ -155,6 +155,43 @@ class GoogleMapsScraper:
         self._stats = {"total": 0, "inserted": 0, "duplicates": 0, "errors": 0, "no_phone": 0, "has_website": 0}
         self._current_query = ""
         self._current_city = ""
+        self._step = ""  # Etape actuelle lisible
+        self._logs: list[dict] = []  # Historique des logs temps reel
+        self._progress = 0  # Progression 0-100
+        self._total_queries = 0
+        self._current_query_index = 0
+        self._current_fiche_index = 0
+        self._total_fiches = 0
+
+    def _log(self, message: str, level: str = "info", data: dict | None = None):
+        """Ajoute un log temps reel et broadcast via WebSocket."""
+        entry = {
+            "time": datetime.now(timezone.utc).isoformat(),
+            "level": level,
+            "message": message,
+            "step": self._step,
+            "stats": self._stats.copy(),
+            "progress": self._progress,
+        }
+        if data:
+            entry["data"] = data
+        self._logs.append(entry)
+        # Garder les 100 derniers logs
+        if len(self._logs) > 100:
+            self._logs = self._logs[-100:]
+        logger.info("[Maps] %s", message)
+        # Broadcast WebSocket
+        try:
+            from app.api.websocket import manager
+            import asyncio
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                loop.create_task(manager.broadcast({
+                    "type": "maps_log",
+                    "data": entry,
+                }))
+        except Exception:
+            pass
 
     @property
     def status(self) -> dict:
@@ -162,7 +199,10 @@ class GoogleMapsScraper:
             "running": self._running,
             "query": self._current_query,
             "city": self._current_city,
+            "step": self._step,
+            "progress": self._progress,
             "stats": self._stats.copy(),
+            "logs": self._logs[-20:],  # 20 derniers logs
         }
 
     def stop(self):
@@ -171,6 +211,8 @@ class GoogleMapsScraper:
     # --- Lancement navigateur stealth ---
     async def _start_browser(self):
         """Lance Chrome reel (pas Chromium) avec stealth complet."""
+        self._step = "Lancement du navigateur..."
+        self._log("Lancement de Chrome stealth")
         pw = await async_playwright().start()
         self._browser = await pw.chromium.launch(
             headless=True,
@@ -193,7 +235,7 @@ class GoogleMapsScraper:
         self._page = await self._context.new_page()
         # Injecter le stealth script AVANT toute navigation
         await self._page.add_init_script(STEALTH_SCRIPT)
-        logger.info("Navigateur stealth lance")
+        self._log("Navigateur Chrome stealth pret")
 
     async def _close_browser(self):
         """Ferme proprement le navigateur."""
@@ -207,6 +249,8 @@ class GoogleMapsScraper:
     # --- Warm-up session (se comporter comme un vrai utilisateur) ---
     async def _warmup(self):
         """Visite Google Maps et accepte les cookies."""
+        self._step = "Warm-up : ouverture Google Maps..."
+        self._log("Navigation vers Google Maps")
         page = self._page
 
         # Aller directement sur Google Maps
@@ -245,6 +289,8 @@ class GoogleMapsScraper:
     # --- Recherche sur Google Maps ---
     async def _search(self, query: str, city: str) -> int:
         """Lance une recherche via URL directe (plus fiable que la saisie)."""
+        self._step = f"Recherche : {query} a {city}..."
+        self._log(f"Recherche Google Maps : '{query} {city}'")
         page = self._page
         search_text = f"{query} {city}"
 
@@ -252,6 +298,7 @@ class GoogleMapsScraper:
         encoded = search_text.replace(' ', '+')
         url = f"https://www.google.fr/maps/search/{encoded}/?hl=fr"
         await page.goto(url, wait_until='domcontentloaded', timeout=30000)
+        self._log("Page chargee, attente des resultats...")
         await asyncio.sleep(_lognormal_delay(4000, 0.4))
 
         # Attendre le feed de resultats
@@ -273,6 +320,7 @@ class GoogleMapsScraper:
                 return 0
 
         # Scroller pour charger plus de resultats
+        self._log("Scroll pour charger plus de resultats...")
         feed = page.locator('div[role="feed"]')
         loaded_count = 0
         max_scrolls = 15
@@ -283,16 +331,15 @@ class GoogleMapsScraper:
             results = page.locator('div[role="feed"] > div > div > a')
             current_count = await results.count()
             if current_count == loaded_count and i > 2:
-                # Plus de nouveaux resultats
                 break
             loaded_count = current_count
+            self._step = f"Scroll {i+1}/{max_scrolls} — {loaded_count} resultats charges"
             # Scroll humain
             await _human_scroll(page, 'div[role="feed"]', random.randint(300, 500))
-            # Macro-pause toutes les 5 scrolls
             if i > 0 and i % 5 == 0:
                 await asyncio.sleep(_lognormal_delay(5000, 0.7))
 
-        logger.info("Recherche '%s' : %d resultats charges", search_text, loaded_count)
+        self._log(f"{loaded_count} resultats charges pour '{search_text}'")
         return loaded_count
 
     # --- Extraire les donnees d'une fiche ---
@@ -406,12 +453,21 @@ class GoogleMapsScraper:
         # Recuperer les liens de tous les resultats
         links = page.locator('div[role="feed"] a.hfpxzc')
         count = await links.count()
-        logger.info("Extraction de %d fiches pour '%s %s'", count, query, city)
+        self._total_fiches = count
+        self._log(f"Debut extraction de {count} fiches pour '{query} {city}'")
 
         extracted = []
         for i in range(count):
             if self._should_stop:
                 break
+
+            self._current_fiche_index = i + 1
+            fiche_pct = round((i + 1) / count * 100) if count > 0 else 0
+            self._step = f"Fiche {i+1}/{count} — {query} ({fiche_pct}%)"
+            self._progress = round(
+                (self._current_query_index / max(self._total_queries, 1)) * 100
+                + (fiche_pct / max(self._total_queries, 1))
+            )
 
             try:
                 # Re-localiser car le DOM peut changer apres navigation
@@ -430,14 +486,20 @@ class GoogleMapsScraper:
 
                     if biz['has_website']:
                         self._stats['has_website'] += 1
-                        continue  # On ne veut que ceux SANS site
+                        self._log(f"❌ {biz['name']} — a un site web, passe", level="skip")
+                        continue
 
                     if not biz['phone']:
                         self._stats['no_phone'] += 1
-                        continue  # Pas de telephone = inutile
+                        self._log(f"⚠️ {biz['name']} — pas de telephone, passe", level="skip")
+                        continue
 
                     extracted.append(biz)
-                    logger.info("LEAD: %s | %s | %s", biz['name'], biz['phone'], city)
+                    self._log(
+                        f"✅ LEAD : {biz['name']} | {biz['phone']} | {biz.get('rating', '?')}/5",
+                        level="success",
+                        data={"name": biz['name'], "phone": biz['phone'], "rating": biz.get('rating')},
+                    )
 
                 # Macro-pause toutes les 5 fiches
                 if i > 0 and i % 5 == 0:
@@ -546,6 +608,12 @@ class GoogleMapsScraper:
         self._running = True
         self._should_stop = False
         self._stats = {"total": 0, "inserted": 0, "duplicates": 0, "errors": 0, "no_phone": 0, "has_website": 0}
+        self._logs = []
+        self._total_queries = len(queries)
+        self._progress = 0
+
+        self._log(f"Demarrage scrape : {len(queries)} categories pour {city}")
+        self._log(f"Categories : {', '.join(queries)}")
 
         try:
             await self._start_browser()
@@ -553,37 +621,55 @@ class GoogleMapsScraper:
 
             searches_this_session = 0
 
-            for query in queries:
+            for qi, query in enumerate(queries):
                 if self._should_stop:
+                    self._log("Arret demande par l'utilisateur", level="warning")
                     break
+
+                self._current_query_index = qi
+                self._progress = round(qi / len(queries) * 100)
 
                 # Limite par session
                 if searches_this_session >= self.MAX_PER_SESSION:
-                    logger.info("Pause session (25 recherches atteintes) — 10 minutes")
+                    self._step = "Pause securite (10 minutes)..."
+                    self._log("Pause de 10 minutes (25 recherches atteintes — anti-detection)")
                     await self._close_browser()
-                    await asyncio.sleep(self.PAUSE_BETWEEN_SESSIONS)
+                    # Countdown de la pause
+                    for remaining in range(self.PAUSE_BETWEEN_SESSIONS, 0, -30):
+                        self._step = f"Pause securite — reprise dans {remaining}s"
+                        await asyncio.sleep(30)
                     await self._start_browser()
                     await self._warmup()
                     searches_this_session = 0
 
-                logger.info("Scrape Maps: '%s' a %s", query, city)
+                self._log(f"[{qi+1}/{len(queries)}] Categorie : {query}")
                 leads = await self.scrape_query(query, city)
 
                 if leads:
+                    self._step = f"Insertion de {len(leads)} leads en base..."
                     await self._insert_leads(leads, city)
-                    logger.info("Insere %d leads pour '%s'", len(leads), query)
+                    self._log(f"{len(leads)} leads inseres pour '{query}'", level="success")
+                else:
+                    self._log(f"0 lead sans site web pour '{query}'", level="info")
 
                 searches_this_session += 1
 
                 # Pause entre les recherches
-                await asyncio.sleep(_lognormal_delay(5000, 0.6))
+                pause = _lognormal_delay(5000, 0.6)
+                self._step = f"Pause humaine ({pause:.0f}s)..."
+                await asyncio.sleep(pause)
 
         except Exception as e:
-            logger.error("Erreur scrape Maps: %s", e)
+            self._log(f"ERREUR : {str(e)[:200]}", level="error")
         finally:
             await self._close_browser()
             self._running = False
-            logger.info("Scrape Maps termine: %s", self._stats)
+            self._progress = 100
+            self._step = "Termine"
+            self._log(
+                f"Scrape termine : {self._stats['inserted']} inseres / {self._stats['total']} scannes / {self._stats['has_website']} avec site / {self._stats['duplicates']} doublons",
+                level="success",
+            )
 
     def start_background(self, queries: list[str], city: str):
         """Lance le scrape en tache de fond."""

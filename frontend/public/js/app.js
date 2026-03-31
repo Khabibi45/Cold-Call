@@ -1795,39 +1795,120 @@ async function startScraper() {
                 <i class="fa-solid fa-check"></i> ${data.message || 'Scrape lance'}
             </div>`;
 
-        // 3. Poller le statut toutes les 3s pour afficher la progression
+        // 3. Poller le statut toutes les 2s — affichage temps reel
         const statusEndpoint = mode === 'maps' ? '/maps-scraper/status' : '/scraper/status';
+        let lastLogCount = 0;
         const pollInterval = setInterval(async () => {
             const status = await apiFetch(statusEndpoint);
-            if (status) {
-                scraperLeadsFound = status.stats?.inserted || 0;
-                scraperDuplicates = status.stats?.duplicates || 0;
-                scraperErrors = status.stats?.errors || 0;
-                updateScraperStats(status.running ? 'En cours...' : 'Termine');
+            if (!status) return;
 
-                if (!status.running) {
-                    clearInterval(pollInterval);
-                    document.getElementById('scraperStatus').className = 'scraper-status offline';
-                    document.getElementById('scraperStatus').innerHTML = '<i class="fa-solid fa-circle"></i> Termine';
-                    disconnectScraperWebSocket();
+            scraperLeadsFound = status.stats?.inserted || 0;
+            scraperDuplicates = status.stats?.duplicates || 0;
+            scraperErrors = status.stats?.errors || 0;
+            const progress = status.progress || 0;
+            const step = status.step || (status.running ? 'En cours...' : 'Termine');
+            updateScraperStats(step);
 
-                    // Resume final
-                    const total = status.stats?.inserted || 0;
-                    const dupes = status.stats?.duplicates || 0;
-                    if (feed) feed.innerHTML += `
-                        <div class="card" style="border-left:3px solid ${total > 0 ? 'var(--success)' : 'var(--warning)'};margin-top:8px">
-                            <p style="font-weight:600;color:${total > 0 ? 'var(--success)' : 'var(--warning)'}">
-                                ${total > 0
-                                    ? `<i class="fa-solid fa-check"></i> ${total} leads inseres (${dupes} doublons evites)`
-                                    : `<i class="fa-solid fa-info-circle"></i> 0 nouveau lead (${dupes} doublons, ou tous les resultats avaient deja un site web)`
-                                }
-                            </p>
-                        </div>`;
-                    // Recharger l'historique
-                    loadScraperHistory();
+            // --- Barre de progression ---
+            let progressBar = document.getElementById('scraperProgressBar');
+            if (!progressBar && status.running) {
+                feed.insertAdjacentHTML('afterbegin', `
+                    <div id="scraperProgressContainer" style="margin-bottom:12px;position:sticky;top:0;background:var(--bg-card);padding:10px;border-radius:8px;border:1px solid var(--border);z-index:5">
+                        <div style="display:flex;justify-content:space-between;margin-bottom:6px">
+                            <span id="scraperStepText" style="font-size:0.82rem;color:var(--text)">${step}</span>
+                            <span id="scraperProgressPct" style="font-size:0.82rem;font-weight:700;color:var(--accent)">${progress}%</span>
+                        </div>
+                        <div style="height:8px;background:var(--border);border-radius:4px;overflow:hidden">
+                            <div id="scraperProgressBar" style="height:100%;background:linear-gradient(90deg,var(--accent),var(--success));border-radius:4px;transition:width 0.5s ease;width:${progress}%"></div>
+                        </div>
+                        <div style="display:flex;gap:16px;margin-top:8px;font-size:0.75rem;color:var(--text-muted)">
+                            <span><strong style="color:var(--success)">${status.stats?.inserted || 0}</strong> inseres</span>
+                            <span><strong>${status.stats?.total || 0}</strong> scannes</span>
+                            <span><strong style="color:var(--text-muted)">${status.stats?.has_website || 0}</strong> ont un site</span>
+                            <span><strong>${status.stats?.duplicates || 0}</strong> doublons</span>
+                        </div>
+                    </div>
+                `);
+                progressBar = document.getElementById('scraperProgressBar');
+            }
+            if (progressBar) {
+                progressBar.style.width = `${progress}%`;
+                const stepEl = document.getElementById('scraperStepText');
+                const pctEl = document.getElementById('scraperProgressPct');
+                if (stepEl) stepEl.textContent = step;
+                if (pctEl) pctEl.textContent = `${progress}%`;
+                // Mettre a jour les mini-stats
+                const container = document.getElementById('scraperProgressContainer');
+                if (container) {
+                    const miniStats = container.querySelector('div:last-child');
+                    if (miniStats) miniStats.innerHTML = `
+                        <span><strong style="color:var(--success)">${status.stats?.inserted || 0}</strong> inseres</span>
+                        <span><strong>${status.stats?.total || 0}</strong> scannes</span>
+                        <span><strong style="color:var(--text-muted)">${status.stats?.has_website || 0}</strong> ont un site</span>
+                        <span><strong>${status.stats?.duplicates || 0}</strong> doublons</span>
+                    `;
                 }
             }
-        }, 3000);
+
+            // --- Logs temps reel ---
+            const logs = status.logs || [];
+            if (logs.length > lastLogCount) {
+                const newLogs = logs.slice(lastLogCount);
+                for (const log of newLogs) {
+                    const colors = { success: 'var(--success)', error: 'var(--danger)', warning: 'var(--warning)', skip: '#555', info: 'var(--accent)' };
+                    const icons = { success: 'fa-circle-check', error: 'fa-circle-xmark', warning: 'fa-triangle-exclamation', skip: 'fa-forward', info: 'fa-circle-info' };
+                    const color = colors[log.level] || 'var(--text-muted)';
+                    const icon = icons[log.level] || 'fa-circle-info';
+                    const time = new Date(log.time).toLocaleTimeString('fr-FR');
+                    feed.insertAdjacentHTML('beforeend', `
+                        <div class="scraper-item" style="border-left:3px solid ${color};padding:6px 10px;font-size:0.82rem;animation:fadeIn 0.3s">
+                            <span style="color:var(--text-muted);font-size:0.7rem;min-width:52px">${time}</span>
+                            <i class="fa-solid ${icon}" style="color:${color}"></i>
+                            <span style="color:${log.level === 'skip' ? '#666' : 'var(--text)'}">${log.message}</span>
+                        </div>
+                    `);
+                }
+                lastLogCount = logs.length;
+                feed.scrollTop = feed.scrollHeight;
+            }
+
+            // --- Fin du scrape ---
+            if (!status.running) {
+                clearInterval(pollInterval);
+                document.getElementById('scraperStatus').className = 'scraper-status offline';
+                document.getElementById('scraperStatus').innerHTML = '<i class="fa-solid fa-circle"></i> Termine';
+                disconnectScraperWebSocket();
+                if (progressBar) { progressBar.style.width = '100%'; progressBar.style.background = 'var(--success)'; }
+
+                const s = status.stats || {};
+                feed.insertAdjacentHTML('beforeend', `
+                    <div class="card" style="border-left:3px solid ${s.inserted > 0 ? 'var(--success)' : 'var(--warning)'};margin-top:12px">
+                        <h4 style="color:${s.inserted > 0 ? 'var(--success)' : 'var(--warning)'}">
+                            ${s.inserted > 0 ? '<i class="fa-solid fa-circle-check"></i>' : '<i class="fa-solid fa-info-circle"></i>'} Scrape termine
+                        </h4>
+                        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(100px,1fr));gap:8px;margin-top:8px">
+                            <div style="text-align:center;padding:8px;background:var(--bg);border-radius:8px">
+                                <div style="font-size:1.3rem;font-weight:700">${s.total || 0}</div>
+                                <div style="font-size:0.7rem;color:var(--text-muted)">Scannes</div>
+                            </div>
+                            <div style="text-align:center;padding:8px;background:var(--bg);border-radius:8px">
+                                <div style="font-size:1.3rem;font-weight:700;color:var(--success)">${s.inserted || 0}</div>
+                                <div style="font-size:0.7rem;color:var(--text-muted)">Inseres</div>
+                            </div>
+                            <div style="text-align:center;padding:8px;background:var(--bg);border-radius:8px">
+                                <div style="font-size:1.3rem;font-weight:700;color:var(--text-muted)">${s.has_website || 0}</div>
+                                <div style="font-size:0.7rem;color:var(--text-muted)">Ont site</div>
+                            </div>
+                            <div style="text-align:center;padding:8px;background:var(--bg);border-radius:8px">
+                                <div style="font-size:1.3rem;font-weight:700">${s.duplicates || 0}</div>
+                                <div style="font-size:0.7rem;color:var(--text-muted)">Doublons</div>
+                            </div>
+                        </div>
+                    </div>
+                `);
+                loadScraperHistory();
+            }
+        }, 2000);
 
     } catch (e) {
         console.error('[Scraper] Erreur reseau:', e);
