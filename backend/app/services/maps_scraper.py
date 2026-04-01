@@ -27,16 +27,16 @@ settings = get_settings()
 # ============================================
 
 def _lognormal_delay(median_ms: float, sigma: float = 0.5) -> float:
-    """Delai log-normal en secondes. Simule le timing humain."""
-    mu = math.log(median_ms / 1000)
+    """Delai log-normal en secondes. Mode RAPIDE (x2)."""
+    mu = math.log(median_ms / 2000)  # /2 = mode rapide
     delay = random.lognormvariate(mu, sigma)
-    return max(0.3, min(delay, 30.0))  # clamp entre 300ms et 30s
+    return max(0.15, min(delay, 10.0))
 
 
 def _gaussian_delay(mean_ms: float, std_ms: float = 50) -> float:
-    """Delai gaussien en secondes pour les frappes clavier."""
-    delay = random.gauss(mean_ms, std_ms) / 1000
-    return max(0.03, min(delay, 0.5))
+    """Delai gaussien rapide pour les actions."""
+    delay = random.gauss(mean_ms * 0.5, std_ms * 0.5) / 1000  # x0.5 = mode rapide
+    return max(0.02, min(delay, 0.25))
 
 
 async def _human_type(page: Page, selector: str, text: str):
@@ -143,8 +143,8 @@ class GoogleMapsScraper:
     Zero API, zero proxy, zero cout.
     Anti-detection : stealth + fingerprint + comportement humain."""
 
-    MAX_PER_SESSION = 25  # Recherches max par session (securite)
-    PAUSE_BETWEEN_SESSIONS = 600  # 10 minutes entre les sessions (secondes)
+    MAX_PER_SESSION = 40  # Recherches max par session (mode rapide)
+    PAUSE_BETWEEN_SESSIONS = 300  # 5 minutes entre les sessions (mode rapide)
 
     def __init__(self):
         self._running = False
@@ -336,8 +336,8 @@ class GoogleMapsScraper:
             self._step = f"Scroll {i+1}/{max_scrolls} — {loaded_count} resultats charges"
             # Scroll humain
             await _human_scroll(page, 'div[role="feed"]', random.randint(300, 500))
-            if i > 0 and i % 5 == 0:
-                await asyncio.sleep(_lognormal_delay(5000, 0.7))
+            if i > 0 and i % 6 == 0:
+                await asyncio.sleep(_lognormal_delay(2000, 0.4))
 
         self._log(f"{loaded_count} resultats charges pour '{search_text}'")
         return loaded_count
@@ -514,9 +514,9 @@ class GoogleMapsScraper:
                         data={"name": biz['name'], "phone": biz['phone'], "rating": biz.get('rating')},
                     )
 
-                # Macro-pause toutes les 5 fiches
-                if i > 0 and i % 5 == 0:
-                    await asyncio.sleep(_lognormal_delay(8000, 0.7))
+                # Micro-pause toutes les 8 fiches
+                if i > 0 and i % 8 == 0:
+                    await asyncio.sleep(_lognormal_delay(3000, 0.5))
 
             except Exception as e:
                 self._stats['errors'] += 1
