@@ -8,7 +8,9 @@ import random
 import math
 import re
 import logging
+from collections import deque
 from datetime import datetime, timezone
+from itertools import count
 from typing import Any
 
 from playwright.async_api import async_playwright, Page, BrowserContext
@@ -156,7 +158,9 @@ class GoogleMapsScraper:
         self._current_query = ""
         self._current_city = ""
         self._step = ""
-        self._logs: list[dict] = []
+        # Logs : deque thread-safe, taille max 500
+        self._logs: deque[dict] = deque(maxlen=500)
+        self._log_counter = count(1)  # Compteur auto-increment pour log_id
         self._progress = 0
         self._total_queries = 0
         self._current_query_index = 0
@@ -166,13 +170,16 @@ class GoogleMapsScraper:
         self._known_names: set[str] = set()
         # Parallelisme : pages multiples
         self._pages: list[Page] = []
-        self._num_workers = 3  # 3 onglets en parallele
+        self._num_workers = 3  # Nombre d'agents paralleles (1-5)
 
-    def _log(self, message: str, level: str = "info", data: dict | None = None):
-        """Ajoute un log temps reel et broadcast via WebSocket."""
+    def _log(self, message: str, level: str = "info", agent_id: int = 0, data: dict | None = None):
+        """Ajoute un log temps reel et broadcast via WebSocket.
+        agent_id=0 : processus principal, 1+ : workers paralleles."""
         entry = {
+            "log_id": next(self._log_counter),
             "time": datetime.now(timezone.utc).isoformat(),
             "level": level,
+            "agent_id": agent_id,
             "message": message,
             "step": self._step,
             "stats": self._stats.copy(),
@@ -180,11 +187,8 @@ class GoogleMapsScraper:
         }
         if data:
             entry["data"] = data
-        self._logs.append(entry)
-        # Garder les 100 derniers logs
-        if len(self._logs) > 100:
-            self._logs = self._logs[-100:]
-        logger.info("[Maps] %s", message)
+        self._logs.append(entry)  # deque(maxlen=500) gere la taille automatiquement
+        logger.info("[Maps][agent:%d] %s", agent_id, message)
         # Broadcast WebSocket
         try:
             from app.api.websocket import manager
@@ -206,8 +210,9 @@ class GoogleMapsScraper:
             "city": self._current_city,
             "step": self._step,
             "progress": self._progress,
+            "num_workers": self._num_workers,
             "stats": self._stats.copy(),
-            "logs": self._logs[-20:],  # 20 derniers logs
+            "logs": list(self._logs)[-20:],  # 20 derniers logs par defaut
         }
 
     def stop(self):
@@ -292,18 +297,19 @@ class GoogleMapsScraper:
             logger.warning("Warm-up : Maps pas completement charge — on continue quand meme")
 
     # --- Recherche sur Google Maps ---
-    async def _search(self, query: str, city: str) -> int:
+    async def _search(self, query: str, city: str, page: Page = None, agent_id: int = 0) -> int:
         """Lance une recherche via URL directe (plus fiable que la saisie)."""
         self._step = f"Recherche : {query} a {city}..."
-        self._log(f"Recherche Google Maps : '{query} {city}'")
-        page = self._page
+        self._log(f"Recherche Google Maps : '{query} {city}'", agent_id=agent_id)
+        if page is None:
+            page = self._page
         search_text = f"{query} {city}"
 
         # Methode URL directe — contourne les problemes de saisie
         encoded = search_text.replace(' ', '+')
         url = f"https://www.google.fr/maps/search/{encoded}/?hl=fr"
         await page.goto(url, wait_until='domcontentloaded', timeout=30000)
-        self._log("Page chargee, attente des resultats...")
+        self._log("Page chargee, attente des resultats...", agent_id=agent_id)
         await asyncio.sleep(_lognormal_delay(4000, 0.4))
 
         # Attendre le feed de resultats
@@ -325,7 +331,7 @@ class GoogleMapsScraper:
                 return 0
 
         # Scroller pour charger plus de resultats
-        self._log("Scroll pour charger plus de resultats...")
+        self._log("Scroll pour charger plus de resultats...", agent_id=agent_id)
         feed = page.locator('div[role="feed"]')
         loaded_count = 0
         max_scrolls = 15
@@ -344,12 +350,14 @@ class GoogleMapsScraper:
             if i > 0 and i % 6 == 0:
                 await asyncio.sleep(_lognormal_delay(2000, 0.4))
 
-        self._log(f"{loaded_count} resultats charges pour '{search_text}'")
+        self._log(f"{loaded_count} resultats charges pour '{search_text}'", agent_id=agent_id)
         return loaded_count
 
     # --- Extraire les donnees d'une fiche ---
-    async def _extract_business(self, page: Page) -> dict | None:
+    async def _extract_business(self, page: Page = None) -> dict | None:
         """Extrait les donnees d'une fiche business ouverte."""
+        if page is None:
+            page = self._page
         await asyncio.sleep(_lognormal_delay(2000, 0.4))
 
         data = {}
@@ -483,9 +491,11 @@ class GoogleMapsScraper:
         if name:
             self._known_names.add(name.strip().lower())
 
-    async def _extract_names_from_list(self, page: Page) -> list[dict]:
+    async def _extract_names_from_list(self, page: Page = None) -> list[dict]:
         """Extrait les noms et aria-labels depuis la LISTE de resultats (sans cliquer).
         Retourne une liste de {index, name, aria_label} pour pre-filtrer."""
+        if page is None:
+            page = self._page
         items = []
         links = page.locator('div[role="feed"] a.hfpxzc')
         count = await links.count()
@@ -498,20 +508,23 @@ class GoogleMapsScraper:
                 items.append({"index": i, "name": ""})
         return items
 
-    async def scrape_query(self, query: str, city: str) -> list[dict]:
-        """Scrape une recherche avec pre-filtrage memoire (skip les fiches deja connues)."""
-        page = self._page
+    async def scrape_query(self, query: str, city: str, page: Page = None, agent_id: int = 0) -> list[dict]:
+        """Scrape une recherche avec pre-filtrage memoire (skip les fiches deja connues).
+        page : page Playwright a utiliser (defaut = self._page).
+        agent_id : identifiant de l'agent/worker (0 = principal, 1+ = workers)."""
+        if page is None:
+            page = self._page
         self._current_query = query
         self._current_city = city
 
         # Lancer la recherche
-        result_count = await self._search(query, city)
+        result_count = await self._search(query, city, page=page, agent_id=agent_id)
         if result_count == 0:
             return []
 
         # ETAPE 1 : Extraire les noms depuis la liste SANS cliquer
         self._step = f"Pre-scan des noms ({query})..."
-        list_items = await self._extract_names_from_list(page)
+        list_items = await self._extract_names_from_list(page=page)
         self._total_fiches = len(list_items)
 
         # ETAPE 2 : Pre-filtrer les noms deja connus
@@ -519,15 +532,15 @@ class GoogleMapsScraper:
         for item in list_items:
             if self._is_known(item['name']):
                 self._stats['skipped_known'] += 1
-                self._log(f"⏭️ {item['name']} — deja en base, skip", level="skip")
+                self._log(f"⏭️ {item['name']} — deja en base, skip", level="skip", agent_id=agent_id)
             else:
                 to_check.append(item)
 
         if not to_check:
-            self._log(f"Toutes les fiches de '{query}' sont deja connues", level="info")
+            self._log(f"Toutes les fiches de '{query}' sont deja connues", level="info", agent_id=agent_id)
             return []
 
-        self._log(f"{len(to_check)} fiches a verifier sur {len(list_items)} ({len(list_items)-len(to_check)} deja connues)")
+        self._log(f"{len(to_check)} fiches a verifier sur {len(list_items)} ({len(list_items)-len(to_check)} deja connues)", agent_id=agent_id)
 
         # ETAPE 3 : Cliquer uniquement sur les fiches INCONNUES
         extracted = []
@@ -550,7 +563,7 @@ class GoogleMapsScraper:
                 await link.click()
                 await asyncio.sleep(_lognormal_delay(2500, 0.5))
 
-                biz = await self._extract_business(page)
+                biz = await self._extract_business(page=page)
                 if biz:
                     self._stats['total'] += 1
                     # Ajouter a la memoire pour eviter les doublons dans la meme session
@@ -558,18 +571,19 @@ class GoogleMapsScraper:
 
                     if biz['has_website']:
                         self._stats['has_website'] += 1
-                        self._log(f"❌ {biz['name']} — a un site web", level="skip")
+                        self._log(f"❌ {biz['name']} — a un site web", level="skip", agent_id=agent_id)
                         continue
 
                     if not biz['phone']:
                         self._stats['no_phone'] += 1
-                        self._log(f"⚠️ {biz['name']} — pas de telephone", level="skip")
+                        self._log(f"⚠️ {biz['name']} — pas de telephone", level="skip", agent_id=agent_id)
                         continue
 
                     extracted.append(biz)
                     self._log(
                         f"✅ LEAD : {biz['name']} | {biz['phone']} | {biz.get('rating', '?')}/5",
                         level="success",
+                        agent_id=agent_id,
                         data={"name": biz['name'], "phone": biz['phone'], "rating": biz.get('rating')},
                     )
 
@@ -680,7 +694,8 @@ class GoogleMapsScraper:
         self._running = True
         self._should_stop = False
         self._stats = {"total": 0, "inserted": 0, "duplicates": 0, "errors": 0, "no_phone": 0, "has_website": 0, "skipped_known": 0}
-        self._logs = []
+        self._logs = deque(maxlen=500)
+        self._log_counter = count(1)  # Reset du compteur de logs
         self._total_queries = len(queries)
         self._progress = 0
 
@@ -696,8 +711,8 @@ class GoogleMapsScraper:
 
             searches_this_session = 0
 
-            # Scraper les categories par paquets de 3 en parallele
-            batch_size = 3
+            # Scraper les categories par paquets en parallele (selon num_workers)
+            batch_size = self._num_workers
             for batch_start in range(0, len(queries), batch_size):
                 if self._should_stop:
                     self._log("Arret demande par l'utilisateur", level="warning")
@@ -734,18 +749,14 @@ class GoogleMapsScraper:
                     # Plusieurs categories : scrape PARALLELE avec pages multiples
                     self._log(f"🚀 Batch parallele : {', '.join(batch)} ({len(batch)} en simultane)")
 
-                    async def _scrape_one(query_name: str, page_obj: Page):
-                        """Scrape une categorie sur une page donnee."""
-                        old_page = self._page
-                        self._page = page_obj  # Temporairement switcher la page active
+                    async def _scrape_one(query_name: str, page_obj: Page, worker_id: int):
+                        """Scrape une categorie sur une page donnee avec un agent identifie."""
                         try:
-                            leads = await self.scrape_query(query_name, city)
+                            leads = await self.scrape_query(query_name, city, page=page_obj, agent_id=worker_id)
                             return query_name, leads
                         except Exception as e:
-                            self._log(f"Erreur parallele '{query_name}': {str(e)[:100]}", level="error")
+                            self._log(f"Erreur parallele '{query_name}': {str(e)[:100]}", level="error", agent_id=worker_id)
                             return query_name, []
-                        finally:
-                            self._page = old_page
 
                     # Creer des pages supplementaires pour le batch
                     extra_pages = []
@@ -758,11 +769,12 @@ class GoogleMapsScraper:
                             break
 
                     # Assigner les pages : page principale + pages extras
+                    # agent_id 1-based pour les workers paralleles
                     all_pages = [self._page] + extra_pages
                     tasks = []
                     for i, q in enumerate(batch):
                         if i < len(all_pages):
-                            tasks.append(_scrape_one(q, all_pages[i]))
+                            tasks.append(_scrape_one(q, all_pages[i], worker_id=i + 1))
 
                     # Lancer en parallele
                     results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -806,10 +818,12 @@ class GoogleMapsScraper:
                 level="success",
             )
 
-    def start_background(self, queries: list[str], city: str):
-        """Lance le scrape en tache de fond."""
+    def start_background(self, queries: list[str], city: str, num_workers: int = 3):
+        """Lance le scrape en tache de fond.
+        num_workers : nombre d'agents paralleles (1-5)."""
         if self._running:
             raise RuntimeError("Scrape deja en cours")
+        self._num_workers = max(1, min(num_workers, 5))
         asyncio.create_task(self.run(queries, city))
 
 

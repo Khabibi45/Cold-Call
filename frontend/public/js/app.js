@@ -1711,11 +1711,78 @@ function disconnectScraperWebSocket() {
     }
 }
 
+// Couleurs par agent pour les logs multi-workers
+const AGENT_COLORS = ['#6366f1', '#22c55e', '#f59e0b', '#ef4444', '#06b6d4'];
+
+// Compteur total de logs pour le bouton "Voir tout"
+let scraperTotalLogCount = 0;
+// Limite de logs visibles dans le feed
+const SCRAPER_LOG_LIMIT = 10;
+
+/**
+ * Rendu d'un log individuel (reutilisable entre feed et modal)
+ */
+function renderLogEntry(log) {
+    const colors = { success: 'var(--success)', error: 'var(--danger)', warning: 'var(--warning)', skip: '#555', info: 'var(--accent)' };
+    const icons = { success: 'fa-circle-check', error: 'fa-circle-xmark', warning: 'fa-triangle-exclamation', skip: 'fa-forward', info: 'fa-circle-info' };
+    const color = colors[log.level] || 'var(--text-muted)';
+    const icon = icons[log.level] || 'fa-circle-info';
+    const time = new Date(log.time).toLocaleTimeString('fr-FR');
+
+    // Pastille coloree pour les agents (agent_id > 0)
+    let agentBadge = '';
+    if (log.agent_id && log.agent_id > 0) {
+        const agentColor = AGENT_COLORS[log.agent_id - 1] || '#6b7280';
+        agentBadge = `<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${agentColor};margin-right:4px"></span><span style="font-size:0.68rem;color:${agentColor};margin-right:6px">A${log.agent_id}</span>`;
+    }
+
+    return `<div class="scraper-item" style="border-left:3px solid ${color};padding:6px 10px;font-size:0.82rem;animation:fadeIn 0.3s">
+        <span style="color:var(--text-muted);font-size:0.7rem;min-width:52px">${time}</span>
+        <i class="fa-solid ${icon}" style="color:${color}"></i>
+        ${agentBadge}
+        <span style="color:${log.level === 'skip' ? '#666' : 'var(--text)'}">${log.message}</span>
+    </div>`;
+}
+
+/**
+ * Met a jour le bouton "Voir tous les logs" avec le compteur
+ */
+function updateShowAllLogsButton() {
+    const btn = document.getElementById('scraperShowAllLogs');
+    const text = document.getElementById('scraperShowAllLogsText');
+    if (!btn) return;
+    if (scraperTotalLogCount > SCRAPER_LOG_LIMIT) {
+        btn.style.display = 'block';
+        if (text) text.textContent = `... Voir tous les logs (${scraperTotalLogCount})`;
+    } else {
+        btn.style.display = 'none';
+    }
+}
+
+/**
+ * Affiche tous les logs dans un modal plein ecran
+ */
+async function showAllLogs() {
+    const data = await apiFetch('/maps-scraper/logs?count=500');
+    if (!data) return;
+    const modal = document.getElementById('logsModal');
+    const content = document.getElementById('logsModalContent');
+    if (!modal || !content) return;
+    // Les logs les plus recents en haut
+    const logs = data.data || [];
+    content.innerHTML = logs.map(log => renderLogEntry(log)).join('');
+    modal.style.display = 'block';
+}
+
 async function startScraper() {
     const city = document.getElementById('scraperCity').value || 'Toulouse';
     const category = document.getElementById('scraperCategory').value || 'restaurant';
     const feed = document.getElementById('scraperFeed');
     const mode = document.getElementById('scraperMode')?.value || 'maps';
+    const numWorkers = parseInt(document.getElementById('scraperWorkers')?.value || '3');
+
+    // Reinitialiser le compteur de logs
+    scraperTotalLogCount = 0;
 
     // Mode API : verifier le cap mensuel AVANT de lancer
     if (mode === 'api') {
@@ -1733,17 +1800,29 @@ async function startScraper() {
                 updateScraperStats('Cap atteint');
                 return;
             }
-            // Afficher le cap restant
+            // Afficher le cap restant + conteneurs de logs
             if (feed) feed.innerHTML = `
                 <div style="padding:8px 12px;background:rgba(99,102,241,0.1);border-radius:8px;margin-bottom:12px;font-size:0.85rem;color:var(--accent)">
                     <i class="fa-solid fa-gauge"></i> Credits restants : ${cap.remaining}/${cap.cap} (${cap.percent_used}% utilise)
+                </div>
+                <div id="scraperLogsList"></div>
+                <div id="scraperShowAllLogs" style="display:none;text-align:center;padding:8px">
+                    <button class="btn btn-sm btn-outline" onclick="showAllLogs()">
+                        <i class="fa-solid fa-scroll"></i> <span id="scraperShowAllLogsText">... Voir tous les logs</span>
+                    </button>
                 </div>`;
         }
     } else {
-        // Mode Maps : pas de cap, afficher un message
+        // Mode Maps : pas de cap, afficher un message + conteneurs de logs
         if (feed) feed.innerHTML = `
             <div style="padding:8px 12px;background:rgba(34,197,94,0.1);border-radius:8px;margin-bottom:12px;font-size:0.85rem;color:var(--success)">
                 <i class="fa-solid fa-map-location-dot"></i> Mode Google Maps — gratuit, pas d'API
+            </div>
+            <div id="scraperLogsList"></div>
+            <div id="scraperShowAllLogs" style="display:none;text-align:center;padding:8px">
+                <button class="btn btn-sm btn-outline" onclick="showAllLogs()">
+                    <i class="fa-solid fa-scroll"></i> <span id="scraperShowAllLogsText">... Voir tous les logs</span>
+                </button>
             </div>`;
     }
 
@@ -1766,8 +1845,8 @@ async function startScraper() {
     // Choisir l'endpoint selon le mode
     const endpoint = mode === 'maps' ? '/maps-scraper/start' : '/scraper/start';
     const bodyPayload = mode === 'maps'
-        ? { query: category, city: city }
-        : { query: category, city: city, limit: 100 };
+        ? { query: category, city: city, num_workers: numWorkers }
+        : { query: category, city: city, limit: 100, num_workers: numWorkers };
 
     // 2. Lancer le scrape — capturer les erreurs detaillees
     try {
@@ -1795,11 +1874,16 @@ async function startScraper() {
             return;
         }
 
-        // Succes — afficher le message
-        if (feed) feed.innerHTML += `
-            <div style="padding:8px 12px;background:rgba(34,197,94,0.1);border-radius:8px;margin-bottom:8px;font-size:0.85rem;color:var(--success)">
-                <i class="fa-solid fa-check"></i> ${data.message || 'Scrape lance'}
-            </div>`;
+        // Succes — afficher le message avant la liste de logs
+        if (feed) {
+            const logsList = document.getElementById('scraperLogsList');
+            if (logsList) {
+                logsList.insertAdjacentHTML('beforebegin', `
+                    <div style="padding:8px 12px;background:rgba(34,197,94,0.1);border-radius:8px;margin-bottom:8px;font-size:0.85rem;color:var(--success)">
+                        <i class="fa-solid fa-check"></i> ${data.message || 'Scrape lance'}
+                    </div>`);
+            }
+        }
 
         // 3. Poller le statut toutes les 2s — affichage temps reel
         const statusEndpoint = mode === 'maps' ? '/maps-scraper/status' : '/scraper/status';
@@ -1818,7 +1902,10 @@ async function startScraper() {
             // --- Barre de progression ---
             let progressBar = document.getElementById('scraperProgressBar');
             if (!progressBar && status.running) {
-                feed.insertAdjacentHTML('afterbegin', `
+                // Inserer la barre avant la liste de logs (sticky en haut)
+                const logsList = document.getElementById('scraperLogsList');
+                const insertTarget = logsList || feed;
+                insertTarget.insertAdjacentHTML('beforebegin', `
                     <div id="scraperProgressContainer" style="margin-bottom:12px;position:sticky;top:0;background:var(--bg-card);padding:10px;border-radius:8px;border:1px solid var(--border);z-index:5">
                         <div style="display:flex;justify-content:space-between;margin-bottom:6px">
                             <span id="scraperStepText" style="font-size:0.82rem;color:var(--text)">${step}</span>
@@ -1827,11 +1914,13 @@ async function startScraper() {
                         <div style="height:8px;background:var(--border);border-radius:4px;overflow:hidden">
                             <div id="scraperProgressBar" style="height:100%;background:linear-gradient(90deg,var(--accent),var(--success));border-radius:4px;transition:width 0.5s ease;width:${progress}%"></div>
                         </div>
-                        <div style="display:flex;gap:16px;margin-top:8px;font-size:0.75rem;color:var(--text-muted)">
+                        <div id="scraperMiniStats" style="display:flex;gap:16px;margin-top:8px;font-size:0.75rem;color:var(--text-muted);flex-wrap:wrap">
                             <span><strong style="color:var(--success)">${status.stats?.inserted || 0}</strong> inseres</span>
                             <span><strong>${status.stats?.total || 0}</strong> scannes</span>
                             <span><strong style="color:var(--text-muted)">${status.stats?.has_website || 0}</strong> ont un site</span>
                             <span><strong>${status.stats?.duplicates || 0}</strong> doublons</span>
+                            <span><strong style="color:#f59e0b">${status.stats?.skipped_known || 0}</strong> deja connus</span>
+                            <span><i class="fa-solid fa-users"></i> ${status.num_workers || 1} agent(s)</span>
                         </div>
                     </div>
                 `);
@@ -1843,39 +1932,36 @@ async function startScraper() {
                 const pctEl = document.getElementById('scraperProgressPct');
                 if (stepEl) stepEl.textContent = step;
                 if (pctEl) pctEl.textContent = `${progress}%`;
-                // Mettre a jour les mini-stats
-                const container = document.getElementById('scraperProgressContainer');
-                if (container) {
-                    const miniStats = container.querySelector('div:last-child');
-                    if (miniStats) miniStats.innerHTML = `
-                        <span><strong style="color:var(--success)">${status.stats?.inserted || 0}</strong> inseres</span>
-                        <span><strong>${status.stats?.total || 0}</strong> scannes</span>
-                        <span><strong style="color:var(--text-muted)">${status.stats?.has_website || 0}</strong> ont un site</span>
-                        <span><strong>${status.stats?.duplicates || 0}</strong> doublons</span>
-                    `;
-                }
+                // Mettre a jour les mini-stats (avec skipped_known et nb workers)
+                const miniStats = document.getElementById('scraperMiniStats');
+                if (miniStats) miniStats.innerHTML = `
+                    <span><strong style="color:var(--success)">${status.stats?.inserted || 0}</strong> inseres</span>
+                    <span><strong>${status.stats?.total || 0}</strong> scannes</span>
+                    <span><strong style="color:var(--text-muted)">${status.stats?.has_website || 0}</strong> ont un site</span>
+                    <span><strong>${status.stats?.duplicates || 0}</strong> doublons</span>
+                    <span><strong style="color:#f59e0b">${status.stats?.skipped_known || 0}</strong> deja connus</span>
+                    <span><i class="fa-solid fa-users"></i> ${status.num_workers || 1} agent(s)</span>
+                `;
             }
 
-            // --- Logs temps reel ---
+            // --- Logs temps reel (nouveaux en haut, limite a 10 dans le feed) ---
             const logs = status.logs || [];
             if (logs.length > lastLogCount) {
                 const newLogs = logs.slice(lastLogCount);
-                for (const log of newLogs) {
-                    const colors = { success: 'var(--success)', error: 'var(--danger)', warning: 'var(--warning)', skip: '#555', info: 'var(--accent)' };
-                    const icons = { success: 'fa-circle-check', error: 'fa-circle-xmark', warning: 'fa-triangle-exclamation', skip: 'fa-forward', info: 'fa-circle-info' };
-                    const color = colors[log.level] || 'var(--text-muted)';
-                    const icon = icons[log.level] || 'fa-circle-info';
-                    const time = new Date(log.time).toLocaleTimeString('fr-FR');
-                    feed.insertAdjacentHTML('beforeend', `
-                        <div class="scraper-item" style="border-left:3px solid ${color};padding:6px 10px;font-size:0.82rem;animation:fadeIn 0.3s">
-                            <span style="color:var(--text-muted);font-size:0.7rem;min-width:52px">${time}</span>
-                            <i class="fa-solid ${icon}" style="color:${color}"></i>
-                            <span style="color:${log.level === 'skip' ? '#666' : 'var(--text)'}">${log.message}</span>
-                        </div>
-                    `);
+                const logsList = document.getElementById('scraperLogsList');
+                if (logsList) {
+                    // Inserer les nouveaux logs en haut (du plus recent au plus ancien)
+                    for (let i = newLogs.length - 1; i >= 0; i--) {
+                        logsList.insertAdjacentHTML('afterbegin', renderLogEntry(newLogs[i]));
+                    }
+                    // Limiter a SCRAPER_LOG_LIMIT logs visibles
+                    while (logsList.children.length > SCRAPER_LOG_LIMIT) {
+                        logsList.removeChild(logsList.lastChild);
+                    }
                 }
                 lastLogCount = logs.length;
-                feed.scrollTop = feed.scrollHeight;
+                scraperTotalLogCount = logs.length;
+                updateShowAllLogsButton();
             }
 
             // --- Fin du scrape ---
@@ -1892,9 +1978,11 @@ async function startScraper() {
                 if (btnStartEnd) { btnStartEnd.disabled = false; btnStartEnd.style.opacity = '1'; btnStartEnd.style.pointerEvents = 'auto'; }
                 if (btnStopEnd) { btnStopEnd.disabled = true; btnStopEnd.style.opacity = '0.4'; btnStopEnd.style.pointerEvents = 'none'; }
 
+                // Resume final insere avant les logs
                 const s = status.stats || {};
-                feed.insertAdjacentHTML('beforeend', `
-                    <div class="card" style="border-left:3px solid ${s.inserted > 0 ? 'var(--success)' : 'var(--warning)'};margin-top:12px">
+                const logsList = document.getElementById('scraperLogsList');
+                const summaryHtml = `
+                    <div class="card" style="border-left:3px solid ${s.inserted > 0 ? 'var(--success)' : 'var(--warning)'};margin-top:12px;margin-bottom:12px">
                         <h4 style="color:${s.inserted > 0 ? 'var(--success)' : 'var(--warning)'}">
                             ${s.inserted > 0 ? '<i class="fa-solid fa-circle-check"></i>' : '<i class="fa-solid fa-info-circle"></i>'} Scrape termine
                         </h4>
@@ -1917,8 +2005,17 @@ async function startScraper() {
                             </div>
                         </div>
                     </div>
-                `);
+                `;
+                if (logsList) {
+                    logsList.insertAdjacentHTML('beforebegin', summaryHtml);
+                } else {
+                    feed.insertAdjacentHTML('beforeend', summaryHtml);
+                }
+
+                // Rafraichir les autres onglets
                 loadScraperHistory();
+                loadDashboard();
+                loadFilters();
             }
         }, 2000);
 

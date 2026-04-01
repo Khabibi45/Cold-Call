@@ -294,6 +294,16 @@
                         <label>Categorie</label>
                         <input type="text" id="scraperCategory" value="restaurant" placeholder="ex: restaurant, coiffeur...">
                     </div>
+                    <div class="form-group">
+                        <label>Agents</label>
+                        <select id="scraperWorkers">
+                            <option value="1">1 agent</option>
+                            <option value="2">2 agents</option>
+                            <option value="3" selected>3 agents</option>
+                            <option value="4">4 agents</option>
+                            <option value="5">5 agents</option>
+                        </select>
+                    </div>
                     <button class="btn btn-success" onclick="startScraper()">
                         <i class="fa-solid fa-play"></i> Lancer
                     </button>
@@ -310,7 +320,14 @@
             <div class="stats-grid" id="scraperStats"></div>
             <div class="card">
                 <h3>Resultats en temps reel</h3>
-                <div id="scraperFeed" class="scraper-feed"></div>
+                <div id="scraperFeed" class="scraper-feed">
+                    <div id="scraperLogsList"></div>
+                    <div id="scraperShowAllLogs" style="display:none;text-align:center;padding:8px">
+                        <button class="btn btn-sm btn-outline" onclick="showAllLogs()">
+                            <i class="fa-solid fa-scroll"></i> <span id="scraperShowAllLogsText">... Voir tous les logs</span>
+                        </button>
+                    </div>
+                </div>
             </div>
             <!-- Historique des ScrapeJobs -->
             <div class="card" style="margin-top:16px">
@@ -444,6 +461,17 @@
             <div id="testsSummary"></div>
             <div id="testsResults" style="margin-top:16px"></div>
         </section>
+
+        <!-- ============ MODAL : LOGS COMPLETS SCRAPER ============ -->
+        <div id="logsModal" style="display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.8);z-index:9998;overflow-y:auto;padding:20px">
+            <div style="max-width:900px;margin:0 auto;background:var(--bg-card);border-radius:12px;border:1px solid var(--border)">
+                <div style="display:flex;justify-content:space-between;align-items:center;padding:16px 20px;border-bottom:1px solid var(--border);position:sticky;top:0;background:var(--bg-card);z-index:1;border-radius:12px 12px 0 0">
+                    <h3 style="margin:0"><i class="fa-solid fa-scroll"></i> Logs complets</h3>
+                    <button class="btn btn-outline" onclick="document.getElementById('logsModal').style.display='none'">Fermer</button>
+                </div>
+                <div id="logsModalContent" style="padding:12px;max-height:80vh;overflow-y:auto"></div>
+            </div>
+        </div>
 
     </main>
 
