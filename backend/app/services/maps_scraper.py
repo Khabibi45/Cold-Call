@@ -152,16 +152,21 @@ class GoogleMapsScraper:
         self._browser = None
         self._context: BrowserContext | None = None
         self._page: Page | None = None
-        self._stats = {"total": 0, "inserted": 0, "duplicates": 0, "errors": 0, "no_phone": 0, "has_website": 0}
+        self._stats = {"total": 0, "inserted": 0, "duplicates": 0, "errors": 0, "no_phone": 0, "has_website": 0, "skipped_known": 0}
         self._current_query = ""
         self._current_city = ""
-        self._step = ""  # Etape actuelle lisible
-        self._logs: list[dict] = []  # Historique des logs temps reel
-        self._progress = 0  # Progression 0-100
+        self._step = ""
+        self._logs: list[dict] = []
+        self._progress = 0
         self._total_queries = 0
         self._current_query_index = 0
         self._current_fiche_index = 0
         self._total_fiches = 0
+        # Memoire : noms deja en base (charge au demarrage du scrape)
+        self._known_names: set[str] = set()
+        # Parallelisme : pages multiples
+        self._pages: list[Page] = []
+        self._num_workers = 3  # 3 onglets en parallele
 
     def _log(self, message: str, level: str = "info", data: dict | None = None):
         """Ajoute un log temps reel et broadcast via WebSocket."""
@@ -452,8 +457,49 @@ class GoogleMapsScraper:
         return data
 
     # --- Pipeline : scraper une recherche complete ---
+    async def _load_known_names(self):
+        """Charge tous les noms deja en base dans un set pour eviter de re-scraper."""
+        try:
+            async with async_session() as session:
+                from sqlalchemy import select
+                result = await session.execute(
+                    select(Lead.business_name).where(Lead.business_name.isnot(None))
+                )
+                names = {row[0].strip().lower() for row in result.all() if row[0]}
+                self._known_names = names
+                self._log(f"Memoire chargee : {len(names)} fiches connues en base")
+        except Exception as e:
+            logger.warning("Erreur chargement memoire noms : %s", e)
+            self._known_names = set()
+
+    def _is_known(self, name: str) -> bool:
+        """Verifie si un nom est deja connu (en base ou scrape cette session)."""
+        if not name:
+            return False
+        return name.strip().lower() in self._known_names
+
+    def _remember(self, name: str):
+        """Ajoute un nom a la memoire de session."""
+        if name:
+            self._known_names.add(name.strip().lower())
+
+    async def _extract_names_from_list(self, page: Page) -> list[dict]:
+        """Extrait les noms et aria-labels depuis la LISTE de resultats (sans cliquer).
+        Retourne une liste de {index, name, aria_label} pour pre-filtrer."""
+        items = []
+        links = page.locator('div[role="feed"] a.hfpxzc')
+        count = await links.count()
+        for i in range(count):
+            try:
+                link = links.nth(i)
+                aria = (await link.get_attribute('aria-label') or '').strip()
+                items.append({"index": i, "name": aria})
+            except Exception:
+                items.append({"index": i, "name": ""})
+        return items
+
     async def scrape_query(self, query: str, city: str) -> list[dict]:
-        """Scrape une recherche complete : resultats + extraction fiches sans site web."""
+        """Scrape une recherche avec pre-filtrage memoire (skip les fiches deja connues)."""
         page = self._page
         self._current_query = query
         self._current_city = city
@@ -463,48 +509,61 @@ class GoogleMapsScraper:
         if result_count == 0:
             return []
 
-        # Recuperer les liens de tous les resultats
-        links = page.locator('div[role="feed"] a.hfpxzc')
-        count = await links.count()
-        self._total_fiches = count
-        self._log(f"Debut extraction de {count} fiches pour '{query} {city}'")
+        # ETAPE 1 : Extraire les noms depuis la liste SANS cliquer
+        self._step = f"Pre-scan des noms ({query})..."
+        list_items = await self._extract_names_from_list(page)
+        self._total_fiches = len(list_items)
 
+        # ETAPE 2 : Pre-filtrer les noms deja connus
+        to_check = []
+        for item in list_items:
+            if self._is_known(item['name']):
+                self._stats['skipped_known'] += 1
+                self._log(f"⏭️ {item['name']} — deja en base, skip", level="skip")
+            else:
+                to_check.append(item)
+
+        if not to_check:
+            self._log(f"Toutes les fiches de '{query}' sont deja connues", level="info")
+            return []
+
+        self._log(f"{len(to_check)} fiches a verifier sur {len(list_items)} ({len(list_items)-len(to_check)} deja connues)")
+
+        # ETAPE 3 : Cliquer uniquement sur les fiches INCONNUES
         extracted = []
-        for i in range(count):
+        for idx, item in enumerate(to_check):
             if self._should_stop:
                 break
 
-            self._current_fiche_index = i + 1
-            fiche_pct = round((i + 1) / count * 100) if count > 0 else 0
-            self._step = f"Fiche {i+1}/{count} — {query} ({fiche_pct}%)"
+            fiche_pct = round((idx + 1) / len(to_check) * 100)
+            self._step = f"Fiche {idx+1}/{len(to_check)} — {query} ({fiche_pct}%)"
             self._progress = round(
                 (self._current_query_index / max(self._total_queries, 1)) * 100
                 + (fiche_pct / max(self._total_queries, 1))
             )
 
             try:
-                # Re-localiser car le DOM peut changer apres navigation
-                link = page.locator('div[role="feed"] a.hfpxzc').nth(i)
+                link = page.locator('div[role="feed"] a.hfpxzc').nth(item['index'])
                 if await link.count() == 0:
                     continue
 
-                # Cliquer sur le resultat
                 await link.click()
                 await asyncio.sleep(_lognormal_delay(2500, 0.5))
 
-                # Extraire les donnees
                 biz = await self._extract_business(page)
                 if biz:
                     self._stats['total'] += 1
+                    # Ajouter a la memoire pour eviter les doublons dans la meme session
+                    self._remember(biz['name'])
 
                     if biz['has_website']:
                         self._stats['has_website'] += 1
-                        self._log(f"❌ {biz['name']} — a un site web, passe", level="skip")
+                        self._log(f"❌ {biz['name']} — a un site web", level="skip")
                         continue
 
                     if not biz['phone']:
                         self._stats['no_phone'] += 1
-                        self._log(f"⚠️ {biz['name']} — pas de telephone, passe", level="skip")
+                        self._log(f"⚠️ {biz['name']} — pas de telephone", level="skip")
                         continue
 
                     extracted.append(biz)
@@ -515,12 +574,12 @@ class GoogleMapsScraper:
                     )
 
                 # Micro-pause toutes les 8 fiches
-                if i > 0 and i % 8 == 0:
+                if idx > 0 and idx % 8 == 0:
                     await asyncio.sleep(_lognormal_delay(3000, 0.5))
 
             except Exception as e:
                 self._stats['errors'] += 1
-                logger.warning("Erreur extraction fiche %d: %s", i, str(e)[:100])
+                logger.warning("Erreur extraction fiche %d: %s", item['index'], str(e)[:100])
                 continue
 
         return extracted
@@ -620,7 +679,7 @@ class GoogleMapsScraper:
         """Lance un scrape complet sur plusieurs categories."""
         self._running = True
         self._should_stop = False
-        self._stats = {"total": 0, "inserted": 0, "duplicates": 0, "errors": 0, "no_phone": 0, "has_website": 0}
+        self._stats = {"total": 0, "inserted": 0, "duplicates": 0, "errors": 0, "no_phone": 0, "has_website": 0, "skipped_known": 0}
         self._logs = []
         self._total_queries = len(queries)
         self._progress = 0
@@ -629,25 +688,30 @@ class GoogleMapsScraper:
         self._log(f"Categories : {', '.join(queries)}")
 
         try:
+            # Charger la memoire des noms deja en base
+            await self._load_known_names()
+
             await self._start_browser()
             await self._warmup()
 
             searches_this_session = 0
 
-            for qi, query in enumerate(queries):
+            # Scraper les categories par paquets de 3 en parallele
+            batch_size = 3
+            for batch_start in range(0, len(queries), batch_size):
                 if self._should_stop:
                     self._log("Arret demande par l'utilisateur", level="warning")
                     break
 
-                self._current_query_index = qi
-                self._progress = round(qi / len(queries) * 100)
+                batch = queries[batch_start:batch_start + batch_size]
+                self._current_query_index = batch_start
+                self._progress = round(batch_start / len(queries) * 100)
 
                 # Limite par session
                 if searches_this_session >= self.MAX_PER_SESSION:
-                    self._step = "Pause securite (10 minutes)..."
-                    self._log("Pause de 10 minutes (25 recherches atteintes — anti-detection)")
+                    self._step = "Pause securite (5 minutes)..."
+                    self._log("Pause de 5 minutes (anti-detection)")
                     await self._close_browser()
-                    # Countdown de la pause
                     for remaining in range(self.PAUSE_BETWEEN_SESSIONS, 0, -30):
                         self._step = f"Pause securite — reprise dans {remaining}s"
                         await asyncio.sleep(30)
@@ -655,21 +719,79 @@ class GoogleMapsScraper:
                     await self._warmup()
                     searches_this_session = 0
 
-                self._log(f"[{qi+1}/{len(queries)}] Categorie : {query}")
-                leads = await self.scrape_query(query, city)
-
-                if leads:
-                    self._step = f"Insertion de {len(leads)} leads en base..."
-                    await self._insert_leads(leads, city)
-                    self._log(f"{len(leads)} leads inseres pour '{query}'", level="success")
+                if len(batch) == 1:
+                    # Une seule categorie : sequentiel classique
+                    self._log(f"[{batch_start+1}/{len(queries)}] {batch[0]}")
+                    leads = await self.scrape_query(batch[0], city)
+                    if leads:
+                        self._step = f"Insertion de {len(leads)} leads..."
+                        await self._insert_leads(leads, city)
+                        self._log(f"{len(leads)} leads inseres pour '{batch[0]}'", level="success")
+                    else:
+                        self._log(f"0 lead pour '{batch[0]}'", level="info")
+                    searches_this_session += 1
                 else:
-                    self._log(f"0 lead sans site web pour '{query}'", level="info")
+                    # Plusieurs categories : scrape PARALLELE avec pages multiples
+                    self._log(f"🚀 Batch parallele : {', '.join(batch)} ({len(batch)} en simultane)")
 
-                searches_this_session += 1
+                    async def _scrape_one(query_name: str, page_obj: Page):
+                        """Scrape une categorie sur une page donnee."""
+                        old_page = self._page
+                        self._page = page_obj  # Temporairement switcher la page active
+                        try:
+                            leads = await self.scrape_query(query_name, city)
+                            return query_name, leads
+                        except Exception as e:
+                            self._log(f"Erreur parallele '{query_name}': {str(e)[:100]}", level="error")
+                            return query_name, []
+                        finally:
+                            self._page = old_page
 
-                # Pause entre les recherches
-                pause = _lognormal_delay(5000, 0.6)
-                self._step = f"Pause humaine ({pause:.0f}s)..."
+                    # Creer des pages supplementaires pour le batch
+                    extra_pages = []
+                    for _ in range(len(batch) - 1):
+                        try:
+                            p = await self._context.new_page()
+                            await p.add_init_script(STEALTH_SCRIPT)
+                            extra_pages.append(p)
+                        except Exception:
+                            break
+
+                    # Assigner les pages : page principale + pages extras
+                    all_pages = [self._page] + extra_pages
+                    tasks = []
+                    for i, q in enumerate(batch):
+                        if i < len(all_pages):
+                            tasks.append(_scrape_one(q, all_pages[i]))
+
+                    # Lancer en parallele
+                    results = await asyncio.gather(*tasks, return_exceptions=True)
+
+                    # Fermer les pages extras
+                    for p in extra_pages:
+                        try:
+                            await p.close()
+                        except Exception:
+                            pass
+
+                    # Traiter les resultats
+                    for result in results:
+                        if isinstance(result, Exception):
+                            self._stats['errors'] += 1
+                            continue
+                        q_name, leads = result
+                        if leads:
+                            self._step = f"Insertion de {len(leads)} leads ({q_name})..."
+                            await self._insert_leads(leads, city)
+                            self._log(f"{len(leads)} leads inseres pour '{q_name}'", level="success")
+                        else:
+                            self._log(f"0 lead pour '{q_name}'", level="info")
+
+                    searches_this_session += len(batch)
+
+                # Pause entre les batchs
+                pause = _lognormal_delay(3000, 0.4)
+                self._step = f"Pause ({pause:.0f}s)..."
                 await asyncio.sleep(pause)
 
         except Exception as e:
