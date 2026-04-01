@@ -349,17 +349,30 @@ class GoogleMapsScraper:
 
         data = {}
 
-        # Nom (h1)
+        # Nom — attendre le panneau de detail puis extraire
         try:
-            name_el = page.locator('h1').first
+            # Attendre le vrai h1 du business (pas "Resultats")
+            await page.wait_for_selector('h1.DUwDvf', timeout=8000)
+            name_el = page.locator('h1.DUwDvf').first
             if await name_el.count() > 0:
                 data['name'] = (await name_el.text_content()).strip()
-            else:
-                data['name'] = None
         except Exception:
-            data['name'] = None
+            pass
 
-        if not data['name']:
+        # Fallback : aria-label du panneau principal
+        if not data.get('name'):
+            try:
+                mains = page.locator('div[role="main"][aria-label]')
+                count = await mains.count()
+                for i in range(count):
+                    label = (await mains.nth(i).get_attribute('aria-label') or '').strip()
+                    if label and label.lower() not in ('résultats', 'results', 'google maps', ''):
+                        data['name'] = label
+                        break
+            except Exception:
+                pass
+
+        if not data.get('name'):
             return None
 
         # Site web : a[data-item-id="authority"] — ABSENT = pas de site
