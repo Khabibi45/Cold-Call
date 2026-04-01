@@ -1750,6 +1750,12 @@ async function startScraper() {
     document.getElementById('scraperStatus').className = 'scraper-status online';
     document.getElementById('scraperStatus').innerHTML = '<i class="fa-solid fa-circle"></i> Scraper actif';
 
+    // Desactiver Lancer, activer Arreter
+    const btnStart = document.querySelector('button[onclick="startScraper()"]');
+    const btnStop = document.querySelector('button[onclick="stopScraper()"]');
+    if (btnStart) { btnStart.disabled = true; btnStart.style.opacity = '0.4'; btnStart.style.pointerEvents = 'none'; }
+    if (btnStop) { btnStop.disabled = false; btnStop.style.opacity = '1'; btnStop.style.pointerEvents = 'auto'; }
+
     scraperLeadsFound = 0;
     scraperDuplicates = 0;
     scraperErrors = 0;
@@ -1880,6 +1886,12 @@ async function startScraper() {
                 disconnectScraperWebSocket();
                 if (progressBar) { progressBar.style.width = '100%'; progressBar.style.background = 'var(--success)'; }
 
+                // Reactiver Lancer, desactiver Arreter
+                const btnStartEnd = document.querySelector('button[onclick="startScraper()"]');
+                const btnStopEnd = document.querySelector('button[onclick="stopScraper()"]');
+                if (btnStartEnd) { btnStartEnd.disabled = false; btnStartEnd.style.opacity = '1'; btnStartEnd.style.pointerEvents = 'auto'; }
+                if (btnStopEnd) { btnStopEnd.disabled = true; btnStopEnd.style.opacity = '0.4'; btnStopEnd.style.pointerEvents = 'none'; }
+
                 const s = status.stats || {};
                 feed.insertAdjacentHTML('beforeend', `
                     <div class="card" style="border-left:3px solid ${s.inserted > 0 ? 'var(--success)' : 'var(--warning)'};margin-top:12px">
@@ -1936,7 +1948,12 @@ async function stopScraper() {
     document.getElementById('scraperStatus').innerHTML = '<i class="fa-solid fa-circle"></i> Scraper arrete';
     updateScraperStats('Arrete');
 
-    // Rafraichir l'historique des jobs
+    // Reactiver Lancer, desactiver Arreter
+    const btnStart = document.querySelector('button[onclick="startScraper()"]');
+    const btnStop = document.querySelector('button[onclick="stopScraper()"]');
+    if (btnStart) { btnStart.disabled = false; btnStart.style.opacity = '1'; btnStart.style.pointerEvents = 'auto'; }
+    if (btnStop) { btnStop.disabled = true; btnStop.style.opacity = '0.4'; btnStop.style.pointerEvents = 'none'; }
+
     loadScraperHistory();
 }
 
