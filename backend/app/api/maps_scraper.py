@@ -52,8 +52,20 @@ async def maps_scrape_logs(count: int = Query(500, ge=1, le=500)):
 
 @router.post("/stop")
 async def stop_maps_scrape():
+    """Arret propre du scrape (attend la fin de l'action en cours)."""
     scraper = get_maps_scraper()
     if not scraper.status['running']:
-        raise HTTPException(400, "Aucun scrape en cours")
+        # Meme si pas "running", force le reset de l'etat au cas ou c'est bloque
+        scraper._running = False
+        scraper._step = "Arrete"
+        return {"message": "Etat reinitialise"}
     scraper.stop()
     return {"message": "Arret demande"}
+
+
+@router.post("/force-stop")
+async def force_stop_maps_scrape():
+    """Arret FORCE : tue le task, ferme le navigateur, reset tout."""
+    scraper = get_maps_scraper()
+    await scraper.force_stop()
+    return {"message": "Scrape force-stoppe"}

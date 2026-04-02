@@ -151,6 +151,7 @@ class GoogleMapsScraper:
     def __init__(self):
         self._running = False
         self._should_stop = False
+        self._task: asyncio.Task | None = None
         self._browser = None
         self._context: BrowserContext | None = None
         self._page: Page | None = None
@@ -216,7 +217,29 @@ class GoogleMapsScraper:
         }
 
     def stop(self):
+        """Demande l'arret du scrape."""
         self._should_stop = True
+
+    async def force_stop(self):
+        """Force l'arret immediat : cancel le task + ferme le navigateur."""
+        self._should_stop = True
+        # Cancel le task asyncio
+        if self._task and not self._task.done():
+            self._task.cancel()
+            try:
+                await self._task
+            except (asyncio.CancelledError, Exception):
+                pass
+        # Fermer le navigateur
+        try:
+            await self._close_browser()
+        except Exception:
+            pass
+        # Reset l'etat
+        self._running = False
+        self._step = "Arrete (force)"
+        self._progress = 0
+        self._log("Scrape force-stoppe", level="warning")
 
     # --- Lancement navigateur stealth ---
     async def _start_browser(self):
@@ -824,7 +847,7 @@ class GoogleMapsScraper:
         if self._running:
             raise RuntimeError("Scrape deja en cours")
         self._num_workers = max(1, min(num_workers, 5))
-        asyncio.create_task(self.run(queries, city))
+        self._task = asyncio.create_task(self.run(queries, city))
 
 
 # Singleton

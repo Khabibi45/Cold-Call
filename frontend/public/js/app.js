@@ -2033,19 +2033,22 @@ async function startScraper() {
 }
 
 async function stopScraper() {
-    // Arreter le scrape cote backend (les deux endpoints, au cas ou)
     const mode = document.getElementById('scraperMode')?.value || 'maps';
-    const stopEndpoint = mode === 'maps' ? '/maps-scraper/stop' : '/scraper/stop';
-    await apiFetch(stopEndpoint, { method: 'POST' });
 
-    // Fermer le WebSocket
+    // D'abord essayer l'arret propre, puis force-stop
+    if (mode === 'maps') {
+        await apiFetch('/maps-scraper/force-stop', { method: 'POST' });
+    } else {
+        await apiFetch('/scraper/stop', { method: 'POST' });
+    }
+
     disconnectScraperWebSocket();
 
     document.getElementById('scraperStatus').className = 'scraper-status offline';
-    document.getElementById('scraperStatus').innerHTML = '<i class="fa-solid fa-circle"></i> Scraper arrete';
+    document.getElementById('scraperStatus').innerHTML = '<i class="fa-solid fa-circle"></i> Arrete';
     updateScraperStats('Arrete');
 
-    // Reactiver Lancer, desactiver Arreter
+    // Reactiver Lancer immediatement
     const btnStart = document.querySelector('button[onclick="startScraper()"]');
     const btnStop = document.querySelector('button[onclick="stopScraper()"]');
     if (btnStart) { btnStart.disabled = false; btnStart.style.opacity = '1'; btnStart.style.pointerEvents = 'auto'; }
